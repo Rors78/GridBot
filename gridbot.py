@@ -1904,6 +1904,13 @@ class Bot:
                     "predicted_yield_day": g.meta.get("yield_day"),
                     "realised_yield_day": real_yd,
                     "time_to_first_rt_s": ttf, "first_rt_note": ttf_note,
+                    # The ladder as it rests right now: [price, "BUY" | "SELL" | None]
+                    # per rung, low to high (None = the one empty rung). Served so
+                    # the console can draw it instead of recomputing levels.
+                    "ladder": [[lv, (o["side"] if o else None)] for lv, o in zip(g.levels, g.orders)],
+                    "cash": g.cash, "base": g.base, "deploy_px": g.deploy_px,
+                    "step_pct": g.meta.get("step_pct"),
+                    "predicted_fills_day": g.meta.get("fills_day"),
                     "scanner_now": ("qualified" if scan_row and scan_row.get("qualified")
                                     else ("ranked, not qualified" if scan_row else "not ranked")),
                 })
@@ -1932,9 +1939,18 @@ class Bot:
                 "exit_after_s": self.args.exit_after,
                 "fees": {"maker": self.args.fee, "taker": self.args.taker,
                          "source": getattr(self.args, "fee_source", "default")},
+                # The guard's own view, in update_guard()'s units: drawdown is
+                # % below the equity peak, day loss is % of capital since the
+                # day's start. Served so the console shows the numbers the
+                # halt is decided on, not its own arithmetic.
                 "guard": {**self.guard,
                           "max_day_loss_pct": getattr(self.args, "max_day_loss_pct", 0.0),
-                          "max_drawdown_pct": getattr(self.args, "max_drawdown_pct", 0.0)},
+                          "max_drawdown_pct": getattr(self.args, "max_drawdown_pct", 0.0),
+                          "equity": self.capital + closed_pnl + tot["realised"] + tot["unrealised"],
+                          "drawdown_pct": (((self.guard["peak"] - (self.capital + closed_pnl + tot["realised"] + tot["unrealised"]))
+                                            / self.guard["peak"] * 100.0) if self.guard.get("peak") else None),
+                          "day_loss_pct": (((self.guard["day_start"] - (self.capital + closed_pnl + tot["realised"] + tot["unrealised"]))
+                                            / self.capital * 100.0) if self.guard.get("day_start") is not None else None)},
                 "ts_epoch": now,
                 "grids_active": len(self.grids),
                 "grids_held": len(self.unrestored),

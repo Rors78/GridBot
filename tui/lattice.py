@@ -1,29 +1,34 @@
-"""GRIDPICK · LATTICE -- all-in-one console for GridBot and its v3.1 scanner.
+"""GRIDPICK · LATTICE -- the all-in-one console for GridBot and its v3.1 scanner.
 
-    python tui/lattice.py [--status PATH] [--oracle-json PATH] [--log PATH] [--refresh S]
-
-PORTED 2026-09-23 from D:/GridPick/tui to D:/GridBot: the executor this was
-written against (HTTP on :8089) is retired. GridBot serves no API, so the
-feeds read the files the bot writes -- status.json, scan.json, gridbot.log --
-see feeds.py. The notes below describe the original; the invariants hold.
+    python tui/lattice.py [--status PATH] [--oracle-json PATH] [--log PATH]
+                          [--journal PATH] [--scanner-log PATH] [--refresh S]
 
 One process, one screen. Rich Live on the alternate screen buffer: it never
 scrolls, and it re-lays itself out from console.size on every frame.
 
-Sources, and nothing else:
-  executor  GET /api/snapshot and /api/grids on the running executor
-  oracle    the running oracle's last scans.jsonl row (or its --json file)
-  log       tail of executor/gridpick_executor.log
+Sources (see feeds.py), and nothing else:
+  status.json    the bot's snapshot: book, capital, guard, fee tier, trade
+                 feed, scanner child, every grid with its resting ladder
+  scan.json      the scanner's ranked pairs with every metric it computed
+  journal.jsonl  the tape: DEPLOY, FILL, FIRST_RT, EXIT, HALT, START, STOP
+  gridbot.log    the bot's own narrative
+  scanner.log    the scanner's gates and rejection reasons
 
-It never opens gridpick_executor_state.json, never imports the executor,
-never calls Kraken, and never changes the execution mode -- it only reads.
-Fields the executor does not serve are drawn as a dim em dash, not derived.
+It never opens state.json, never imports gridbot.py, never calls Kraken, and
+never changes anything -- it only reads. Fields the bot does not serve are
+drawn as a dim em dash, never derived.
+
+Colour law: amber = a scanner (predicted) number, cyan = a bot (realised)
+number, white = identity, green/amber/red = health.
+
+Screens: main · enter = oracle detail for the selected pair · l = log ·
+t = tape · ? = help · esc back · q quit.
 """
 from __future__ import annotations
 
 import os
 
-# The user's invariant for anything near the executor. This module does not
+# The user's invariant for anything near the bot. This module does not
 # import it -- but if anything ever does, it must find this set first.
 os.environ.setdefault("GRIDPICK_TEST", "1")
 
@@ -64,14 +69,16 @@ STALE_S, DEAD_S = 12.0, 30.0
 
 # ---------------------------------------------------------------- modes --
 class Mode(NamedTuple):
-    w: str      # ref | narrow | stacked | single
-    h: str      # full | short | tiny
+    w: str      # wide | ref | narrow | stacked | single
+    h: str      # tall | full | short | tiny
 
 
 def mode_for(width, height):
-    """Spec §3 breakpoints. Pure, so the test can assert each size lands
-    in a distinct layout rather than one layout that happens to fit all."""
-    if width >= 140:
+    """Breakpoints. Pure, so a test can assert each size lands in a distinct
+    layout rather than one layout that happens to fit all."""
+    if width >= 176:
+        w = "wide"
+    elif width >= 140:
         w = "ref"
     elif width >= 110:
         w = "narrow"
@@ -79,14 +86,14 @@ def mode_for(width, height):
         w = "stacked"
     else:
         w = "single"
-    h = "full" if height >= 36 else ("short" if height >= 28 else "tiny")
+    h = "tall" if height >= 44 else ("full" if height >= 36 else ("short" if height >= 28 else "tiny"))
     return Mode(w, h)
 
 
 @dataclass
 class UI:
     sel: int = 0
-    view: str = "main"          # main | help | detail | log
+    view: str = "main"          # main | help | detail | log | tape
     paused: bool = False
 
 
@@ -105,9 +112,7 @@ def T(*parts):
 
 
 def glyph_text(s, empty="dim"):
-    """Style a glyph string (gauge/strip/bar) char by char from the theme.
-    `empty` is the style for empty cells: a gauge with nothing to mark on it
-    takes the quieter frame tone, so a run of them does not read as a slab."""
+    """Style a glyph string (gauge/strip/bar) char by char from the theme."""
     style = {G["held"]: "held", G["empty"]: empty, G["cursor"]: "cursor",
              G["lcap"]: "frame", G["rcap"]: "frame"}
     t = Text(no_wrap=True, overflow="crop")
@@ -117,8 +122,7 @@ def glyph_text(s, empty="dim"):
 
 
 def short_px(p):
-    """Price in at most 7 cells, so band labels keep the gauges aligned.
-    Measured on the live board: SHIB/PEPE sit near 5e-6, PENGU near 0.007."""
+    """Price in at most 7 cells, so ladders and band labels stay aligned."""
     if p is None:
         return DASH
     a = abs(p)
@@ -146,17 +150,24 @@ def fmt_secs(s):
     return f"{s:.1f}s" if s < 10 else f"{s:.0f}s"
 
 
-def fmt_span_min(m):
-    if m is None:
+def fmt_dur(s):
+    """A duration for humans: 45s, 5m12s, 22h30m, 1d02h."""
+    if s is None or s == float("inf"):
         return DASH
-    m = int(m)
-    return f"{m // 1440}d{m % 1440 // 60:02d}h"
+    s = max(0, int(s))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    if s < 86400:
+        return f"{s // 3600}h{s % 3600 // 60:02d}m"
+    return f"{s // 86400}d{s % 86400 // 3600:02d}h"
 
 
-def fmt_uptime(hours):
-    if hours is None:
+def fmt_uptime(seconds):
+    if seconds is None:
         return DASH
-    m = int(hours * 60)
+    m = int(seconds // 60)
     return f"{m // 1440}d {m % 1440 // 60:02d}:{m % 60:02d}"
 
 
@@ -166,8 +177,28 @@ def signed_usd(v):
     return f"{'+' if v >= 0 else '−'}${abs(v):.2f}"
 
 
+def usd(v, nd=2):
+    return DASH if v is None else f"${v:,.{nd}f}"
+
+
+def pct(v, nd=1, signed=False):
+    if v is None:
+        return DASH
+    return f"{v:+.{nd}f}%" if signed else f"{v:.{nd}f}%"
+
+
+def num(v, f="{:.2f}"):
+    return DASH if v is None else f.format(v)
+
+
+def pnl_style(v):
+    if v is None:
+        return "dim"
+    return "ok" if v > 0 else ("danger" if v < 0 else "realised")
+
+
 def fresh(age):
-    """(glyph, style) for a data age, per spec stale rule."""
+    """(glyph, style) for a data age."""
     if age is None or age > DEAD_S:
         return G["dead"], "danger"
     if age > STALE_S:
@@ -179,143 +210,153 @@ def base(sym):
     return (sym or "?").split("/")[0]
 
 
+def bar(frac, width, fill="held", empty="dim", hot=None):
+    """A horizontal gauge of `width` cells for frac in [0, 1]."""
+    frac = 0.0 if frac is None else max(0.0, min(1.0, frac))
+    n = int(round(frac * width))
+    return T((G["held"] * n, hot or fill), (G["empty"] * (width - n), empty))
+
+
 # --------------------------------------------------------------- derive --
-_CAP_RE = re.compile(r"at max exposure: \$([\d,.]+) of \$([\d,.]+)")
-
-
 def derive(st):
-    """Every number shown in more than one place is computed here, once.
-    Nothing here is a recomputation of a trading quantity: it is the
-    executor's and oracle's own values, picked out and formatted."""
-    snap = st.get("snapshot") or {}
-    grids = st.get("grids") or {}
-    orc = st.get("oracle") or {}
+    """Everything the panels draw, picked out once. Nothing here is a
+    recomputation of a trading quantity: it is the bot's and scanner's own
+    values, named and formatted."""
+    S = st.get("snapshot") or {}
     V = SimpleNamespace()
+    V.S = S
+    V.grids = st.get("grids") or []
     V.snap_age = st.get("snapshot_age")
-    V.grids_age = st.get("grids_age")
     V.api_dead = V.snap_age is None or V.snap_age > DEAD_S
-    V.mode = (snap.get("execution_mode") or DASH).upper()
-    V.uptime = fmt_uptime(snap.get("uptime_hours"))
-    ws = snap.get("ws") or {}
-    V.ws_tick = ws.get("oldest_tick_age_s")
-    V.n_grids = snap.get("n_active_grids", len(grids) if grids else None)
-    V.cycles = snap.get("total_cycles")
-    V.pnl = snap.get("total_pnl")            # GROSS, per the executor
-    V.fees = snap.get("total_fees")
-    V.realised = snap.get("realised")
-    V.unrealised = snap.get("unrealised")
-    V.closed_n = snap.get("closed_count")
-    V.halt = snap.get("halt")
-    V.unrestored = snap.get("unrestored") or []
-    V.exit_after = snap.get("exit_after_s")
-    V.feed_connected = snap.get("feed_connected")
-    V.feed_last_error = snap.get("feed_last_error") or ""
-    V.gaps = snap.get("catch_up_gaps") or 0
-    V.scanner_running = snap.get("scanner_running")
-    V.scanner_note = snap.get("scanner_note") or ""
-    V.history_n = len(snap.get("trade_history") or [])
-    refusals = snap.get("refusals") or {}
-    V.n_refused = len(refusals)
-    # The executor's own ledger (reserved_usd / pool_total_usd, since
-    # 91fc438). Older executors only say it inside a refusal string; that
-    # parse stays as a labelled fallback, never silently.
-    V.reserved, V.cap, V.reserved_src = snap.get("reserved_usd"), snap.get("pool_total_usd"), ""
-    if V.reserved is None or not V.cap:
-        V.reserved = V.cap = None
-        for why in refusals.values():
-            m = _CAP_RE.search(str(why))
-            if m:
-                V.reserved = float(m.group(1).replace(",", ""))
-                V.cap = float(m.group(2).replace(",", ""))
-                V.reserved_src = " (from refusal)"
-                break
-    V.grids = [dict(g, pair=g.get("pair") or k) for k, g in grids.items()]
+    V.mode = (S.get("mode") or DASH).upper()
+    orc = st.get("oracle") or {}
+    V.orc = orc
     V.orc_rows = orc.get("rows") or []
-    V.orc_version = orc.get("version")
-    V.orc_interval = orc.get("interval")
-    V.orc_scanned = orc.get("n_scanned")
-    V.orc_qual = orc.get("n_qualified")
-    V.orc_rejects = orc.get("rejects")
     V.scan_age = st.get("oracle_scan_age")
     V.refresh = st.get("refresh_s") or 120
     V.scan_stale = V.scan_age is None or V.scan_age > 2 * V.refresh
+    sl = st.get("scanner_log") or {}
+    V.gates = sl.get("gates")
+    V.rejects = sl.get("rejects") or []
+    V.n_rejected = sl.get("n_rejected")
+    V.scanner_log_age = st.get("scanner_log_age")
+    V.journal = st.get("journal") or []
     V.log = st.get("log") or []
     V.pnl_hist = st.get("pnl_hist") or []
     V.now = st.get("now") or datetime.now(timezone.utc)
+    V.today = st.get("today") or ""
     return V
 
 
 # ---------------------------------------------------------------- header --
-def header_panel(V, width):
-    clock = V.now.strftime("%Y-%m-%d %H:%M:%S UTC")
-    g, gs = fresh(V.snap_age)
-    ages = f" {fmt_clock(V.scan_age)} ago" if V.scan_age is not None else f" {DASH}"
-    nxt = DASH if V.scan_age is None else fmt_clock(max(0, V.refresh - V.scan_age % V.refresh))
-    orc = T(("ORACLE ", "title"), (f"v{V.orc_version or DASH}", "predicted"),
-            (f"  {V.orc_interval or DASH} · ", "dim"),
-            (f"{V.orc_scanned if V.orc_scanned is not None else DASH}", "predicted"),
-            (" pairs · ", "dim"),
-            (f"{V.orc_qual if V.orc_qual is not None else DASH}", "predicted"),
-            (" qual · scan", "dim"),
-            (ages, "warn" if V.scan_stale else "dim"),
-            (f" · next ~{nxt}", "dim"))
-    mode_style = "danger" if V.mode == "LIVE" else "title"
-    ws_style = "warn" if (V.ws_tick or 0) > DEAD_S else "realised"
-    exe = T(("   GRIDBOT ", "title"), (g + " ", gs), (V.mode, mode_style),
-            ("  up ", "dim"), (V.uptime, "realised"),
-            ("  ws ", "dim"),
-            (fmt_secs(V.ws_tick), ws_style),
-            ("  status ", "dim"),
-            (fmt_secs(V.snap_age), gs))
-    # Below the reference width the line crops; executor liveness goes
-    # first there, since it is the one thing that must never be cut off.
-    top = T(orc, exe) if width >= 140 else T(exe.copy()[3:], ("   ", ""), orc)
-
-    if V.reserved is not None and V.cap:
-        frac = V.reserved / V.cap
-        bw = 20 if width >= 110 else 10
-        n = min(bw, int(round(frac * bw)))
-        full = frac >= 0.999
-        res = T(("reserved ", "dim"), (f"${V.reserved:.2f} / ${V.cap:.2f} ", "realised"),
-                (G["held"] * n, "danger" if full else "held"), (G["empty"] * (bw - n), "dim"),
-                (f" {frac * 100:.0f}%", "danger" if full else "realised"),
-                (V.reserved_src, "dim"))
-    else:
-        res = T(("reserved ", "dim"), (DASH, "dim"))
-    line2 = T(res, ("   live grids ", "dim"),
-              (str(V.n_grids) if V.n_grids is not None else DASH, "realised"),
-              ("   cycles ", "dim"), (str(V.cycles) if V.cycles is not None else DASH, "realised"),
-              ("   pnl ", "dim"), (signed_usd(V.pnl), "realised"),
-              ("   skipped ", "dim"), (str(V.n_refused), "warn" if V.n_refused else "dim"),
-              ("   HALTED" if V.halt else "", "danger"))
-    title = T(("GRIDPICK ", "title"), (G["cursor"], "cursor"), (" LATTICE", "title"))
-    # Clock on the top border, right-aligned, as in the spec frame. Panel
-    # draws "┌─ " + title + " ─…┐", so the title may use width - 6 cells.
-    fill = width - 6 - title.cell_len - len(clock) - 2
-    if fill >= 1:
-        title.append(" " + "─" * fill + " ", style="frame")
-        title.append(clock, style="dim")
-    name = T(("G R I D P I C K", "title"), ("   lattice console, read-only", "dim"))
-    g = Table.grid(padding=(0, 2))
-    g.add_column(width=LOGO_COLS, no_wrap=True)
-    g.add_column(ratio=1)
-    g.add_row(logo_block(), Group(name, top, line2))
-    return Panel(g, title=title, title_align="left",
-                 border_style="frame", box=box.SQUARE, padding=(0, 1), height=HEAD_H)
-
-
-# THE HEADER LOGO IS THE REAL ICON (operator, 2026-09-23: "everyone else will need a
-# rewrite"). The header reserves a block of cells with a background colour nothing
-# else uses; after each frame draw_logo() finds it and paints assets/gridpick_logo.png
-# over it as a Sixel image (Windows Terminal: 10x20 image pixels per cell, 3 rows =
-# 60 px). A terminal without Sixel ignores the sequence and shows the blank block.
 LOGO_MARK = "#010203"
 LOGO_ROWS, LOGO_COLS = 3, 6
-HEAD_H = LOGO_ROWS + 2
+HEAD_LINES = 4
+HEAD_H = HEAD_LINES + 2
 ESC = chr(27)
 _LOGO_SIXEL = None
 
 
+def header_lines(V, width):
+    S = V.S
+    g, gs = fresh(V.snap_age)
+    mode_style = "danger" if V.mode == "LIVE" else "title"
+    # 1. identity and the three things that must be alive: bot, feed, scanner
+    fc = S.get("feed_connected")
+    feed_g, feed_s = ((G["fresh"], "ok") if fc else ((G["dead"], "danger") if fc is False else (DASH, "dim")))
+    ws = S.get("feed_msg_age_s")
+    sr = S.get("scanner_running")
+    sc_g, sc_s = ((G["fresh"], "ok") if sr else ((G["dead"], "danger") if sr is False else (DASH, "dim")))
+    nxt = DASH if V.scan_age is None else fmt_clock(max(0, V.refresh - V.scan_age % V.refresh))
+    l1 = T(("GRIDBOT ", "title"), (f"v{S.get('version') or DASH} ", "dim"), (g + " ", gs), (V.mode, mode_style),
+           ("  up ", "dim"), (fmt_uptime(S.get("uptime_s")), "realised"),
+           ("  status ", "dim"), (fmt_secs(V.snap_age), gs),
+           ("   FEED ", "title"), (feed_g + " ", feed_s), ("ws ", "dim"),
+           (fmt_secs(ws), "warn" if (ws or 0) > DEAD_S else "realised"),
+           ("  conn ", "dim"), (str(S.get("feed_connects") if S.get("feed_connects") is not None else DASH), "realised"),
+           ("  err ", "dim"), (str(S.get("feed_errors") if S.get("feed_errors") is not None else DASH),
+                              "warn" if S.get("feed_errors") else "realised"),
+           ("  gaps ", "dim"), (str(S.get("catch_up_gaps") or 0), "danger" if S.get("catch_up_gaps") else "realised"),
+           ("   SCANNER ", "title"), (sc_g + " ", sc_s),
+           ("pid ", "dim"), (str(S.get("scanner_pid") or DASH), "realised"),
+           ("  starts ", "dim"), (str(S.get("scanner_starts") if S.get("scanner_starts") is not None else DASH), "realised"),
+           ("  scan ", "dim"), (f"{fmt_clock(V.scan_age)} ago" if V.scan_age is not None else DASH,
+                               "warn" if V.scan_stale else "realised"),
+           (f" · next ~{nxt}", "dim"))
+    # 2. capital: what is committed, of what, and what the next grid would get
+    cap, dep = S.get("capital"), S.get("deployed")
+    held = S.get("held_usd") or 0.0
+    frac = ((dep or 0.0) + held) / cap if cap else None
+    bw = 16 if width >= 140 else 8
+    ea = S.get("exit_after_s")
+    l2 = T(("capital ", "dim"), (usd(cap), "realised"),
+           ("  deployed ", "dim"), (usd((dep or 0.0) + held) if dep is not None else DASH, "realised"), (" ", ""),
+           bar(frac, bw, hot="warn" if (frac or 0) >= 0.999 else None),
+           (f" {frac * 100:.0f}%" if frac is not None else f" {DASH}", "realised"),
+           ("   grids ", "dim"), (f"{S.get('grids_active') if S.get('grids_active') is not None else DASH}/"
+                                 f"{S.get('max_grids') or DASH}", "realised"),
+           (f"  held {S.get('grids_held')}" if S.get("grids_held") else "", "danger"),
+           ("  · ", "dim"), (usd(S.get("alloc_per_grid")), "realised"), (" each · next ", "dim"),
+           (usd(S.get("alloc_next")), "realised"),
+           ("  · capital now ", "dim"), (usd(S.get("capital_now")), "realised"),
+           ("  · exit after ", "dim"),
+           (f"{ea:.0f}s" if isinstance(ea, (int, float)) and ea > 0 else ("never" if ea == 0 else DASH), "realised"))
+    # 3. the book
+    l3 = T(("equity ", "dim"), (usd(S.get("equity")), "realised"),
+           ("  pnl ", "dim"), (signed_usd(S.get("total_pnl")), pnl_style(S.get("total_pnl"))),
+           ("  = real ", "dim"), (signed_usd(S.get("realised")), pnl_style(S.get("realised"))),
+           (" · unreal ", "dim"), (signed_usd(S.get("unrealised")), pnl_style(S.get("unrealised"))),
+           (" · fees ", "dim"), (usd(S.get("fees")), "realised"),
+           ("   fills ", "dim"), (str(S.get("fills")), "realised"),
+           (" · round trips ", "dim"), (str(S.get("round_trips")), "realised"),
+           (" · closed grids ", "dim"), (str(S.get("closed_count") if S.get("closed_count") is not None else DASH), "realised"),
+           ("   fees maker ", "dim"), (pct(S.get("fee_maker"), 2), "realised"),
+           (" taker ", "dim"), (pct(S.get("fee_taker"), 2), "realised"),
+           (f"  · {S.get('fee_source')}" if S.get("fee_source") else "", "dim"))
+    # 4. the guard, in its own units
+    dl, dlm = S.get("guard_day_loss_pct"), S.get("guard_max_day_loss_pct")
+    dd, ddm = S.get("guard_drawdown_pct"), S.get("guard_max_drawdown_pct")
+    gw = 10 if width >= 140 else 6
+
+    def guard_bit(label, v, lim):
+        if v is None:
+            return T((f"{label} ", "dim"), (DASH, "dim"))
+        used = max(0.0, v)
+        frac = (used / lim) if lim else 0.0
+        style = "danger" if frac >= 1 else ("warn" if frac >= 0.5 else "ok")
+        up = f" (up {-v:.1f}%)" if v < 0 else ""
+        return T((f"{label} ", "dim"), (f"{used:.1f}%", style), (" of ", "dim"),
+                 (f"{lim:g}%" if lim else "off", "realised"), (" ", ""), bar(frac, gw, hot=style), (up, "ok"))
+
+    halt = S.get("halt")
+    l4 = T(("GUARD ", "title"), guard_bit("day loss", dl, dlm), ("   ", ""), guard_bit("drawdown", dd, ddm),
+           ("   peak ", "dim"), (usd(S.get("guard_peak")), "realised"),
+           ("  day start ", "dim"), (usd(S.get("guard_day_start")), "realised"),
+           ("   halt ", "dim"), ((halt if halt else DASH), "danger" if halt else "ok"))
+    return [l1, l2, l3, l4]
+
+
+def header_panel(V, width):
+    clock = V.now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    title = T(("GRIDPICK ", "title"), (G["cursor"], "cursor"), (" LATTICE", "title"))
+    fill = width - 6 - title.cell_len - len(clock) - 2
+    if fill >= 1:
+        title.append(" " + "─" * fill + " ", style="frame")
+        title.append(clock, style="dim")
+    lines = header_lines(V, width)
+    g = Table.grid(padding=(0, 2))
+    g.add_column(width=LOGO_COLS, no_wrap=True)
+    g.add_column(ratio=1)
+    g.add_row(logo_block(), Group(*lines))
+    return Panel(g, title=title, title_align="left",
+                 border_style="frame", box=box.SQUARE, padding=(0, 1), height=HEAD_H)
+
+
+# THE HEADER LOGO IS THE REAL ICON. The header reserves a block of cells with a
+# background colour nothing else uses; after each frame draw_logo() finds it and
+# paints assets/gridpick_logo.png over it as a Sixel image (Windows Terminal:
+# 10x20 image pixels per cell, 3 rows = 60 px). A terminal without Sixel
+# ignores the sequence and shows the blank block.
 def logo_block():
     t = Text()
     for i in range(LOGO_ROWS):
@@ -331,8 +372,7 @@ def draw_logo(console, renderable):
     try:
         if _LOGO_SIXEL is None:
             from sixelimg import sixel
-            _LOGO_SIXEL = sixel(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "gridpick_logo.png"),
-                                height_px=LOGO_ROWS * 20)
+            _LOGO_SIXEL = sixel(os.path.join(_HERE, "assets", "gridpick_logo.png"), height_px=LOGO_ROWS * 20)
         from rich.cells import cell_len
         rows = console.render_lines(renderable, console.options.update(height=console.height), pad=False)
         for y, line in enumerate(rows):
@@ -349,47 +389,51 @@ def draw_logo(console, renderable):
 
 
 # ---------------------------------------------------------------- oracle --
-# (key, header, width, justify). Band is the flexible column.
+# (header, width, justify). band is the flexible column.
 _COLS = {
     "rank": ("  #", 3, "right"),
     "pair": ("PAIR", 6, "left"),
     "price": ("PRICE", 7, "right"),
     "band": ("BAND  lo ─◆─ hi", 0, "left"),
-    "k": ("k", 4, "right"),
+    "kind": ("KIND", 5, "left"),
     "lv": ("LV", 3, "right"),
-    "yd": ("Y/D IS", 6, "right"),
-    "ydo": ("Y/D OOS", 7, "right"),
+    "k": ("k", 3, "right"),
+    "step": ("STEP%", 5, "right"),
+    "net": ("NET%", 5, "right"),
+    "fd": ("F/d", 5, "right"),
+    "rtd": ("RT/d", 5, "right"),
+    "yd": ("Y/D", 5, "right"),
+    "adj": ("ADJ", 5, "right"),
     "cont": ("CONT", 4, "right"),
-    "conto": ("CONT IS/OOS", 11, "right"),
-    "dd": ("DD%", 5, "right"),
+    "mae": ("MAE", 4, "right"),
+    "vr": ("VR", 4, "right"),
+    "h": ("H", 4, "right"),
+    "atr": ("ATR%", 4, "right"),
+    "liq": ("LIQ", 5, "right"),
+    "spr": ("SPR%", 4, "right"),
+    "d5": ("D5%", 4, "right"),
     "flag": ("FLAG", 6, "left"),
     "q": ("Q", 1, "right"),
 }
-_ORDER = ["rank", "pair", "price", "band", "k", "lv", "yd", "ydo", "conto", "cont",
-          "dd", "flag", "q"]
-# Spec order for 110-139: FLAG, DD%, CONT OOS, Y/D OOS. Then, only if a
-# panel is narrower than any spec size, further silent drops.
-_DROP = ["flag", "dd", "conto", "ydo", "price", "k", "lv", "band"]
+_ORDER = ["rank", "pair", "price", "band", "kind", "lv", "step", "net", "fd", "rtd", "yd", "adj",
+          "cont", "mae", "vr", "h", "atr", "liq", "spr", "d5", "k", "flag", "q"]
+# Dropped in this order as the panel narrows. Y/D, CONT, Q and the band go last.
+_DROP = ["k", "d5", "spr", "liq", "atr", "h", "vr", "mae", "rtd", "adj", "net", "kind", "price",
+         "step", "fd", "flag", "lv", "band"]
 
 
-def oracle_columns(mode, inner_w):
-    cols = [c for c in _ORDER if c != "cont"]
-    n_spec = 0 if mode.w == "ref" else 4
-    for c in _DROP[:n_spec]:
-        cols.remove(c)
-    if "conto" not in cols and "cont" not in cols:
-        cols.insert(cols.index("yd") + 1, "cont")
+def oracle_columns(inner_w):
+    cols = list(_ORDER)
 
     def fixed(cs):
         return sum(_COLS[c][1] for c in cs if c != "band") + len(cs) - 1
 
-    for c in _DROP[n_spec:]:
-        if "band" in cols and inner_w - fixed(cols) >= 6:
+    for c in _DROP:
+        if "band" in cols and inner_w - fixed(cols) >= 12:
             break
         if "band" not in cols and fixed(cols) <= inner_w:
             break
-        if c in cols:
-            cols.remove(c)
+        cols.remove(c)
     band_w = max(0, inner_w - fixed(cols)) if "band" in cols else 0
     return cols, band_w
 
@@ -399,8 +443,6 @@ def band_cell(r, band_w):
     los, his = short_px(lo).rjust(7), short_px(hi).ljust(7)
     g_w = band_w - len(los) - len(his) - 2
     px = r.get("price")
-    # Capped at 24 (the spec frame draws 15): seen live on a 180-column
-    # window, a 40-cell gauge with no price cursor is a grey slab in Consolas.
     tone = "dim" if px is not None else "frame"
     if g_w >= 4:
         g_w = min(g_w, 24)
@@ -409,59 +451,91 @@ def band_cell(r, band_w):
     return glyph_text(glyphs.band_gauge(px, lo, hi, max(1, min(band_w, 24))), tone)
 
 
-def oracle_cell(c, i, r, band_w, selected=False):
-    num = lambda v, f: (f.format(v), "predicted") if v is not None else (DASH, "dim")  # noqa: E731
+def oracle_cell(c, i, r, band_w, selected=False, live=False):
+    def P(v, f="{:.2f}"):
+        return (f.format(v), "predicted") if v is not None else (DASH, "dim")
+
     if c == "rank":
         n = str(i + 1)
-        if selected:       # the spec's price-cursor glyph doubles as row cursor
+        if selected:
             return T((G["cursor"], "cursor"), (n.rjust(2), "cursor"))
         return T((n.rjust(3), "dim"))
     if c == "pair":
-        return T((base(r.get("symbol")), "title"))
+        return T((base(r.get("symbol")), "realised" if live else "title"))
     if c == "price":
         return T((short_px(r.get("price")), "predicted" if r.get("price") else "dim"))
     if c == "band":
         return band_cell(r, band_w)
-    if c == "k":
-        return T(num(r.get("k"), "{:g}"))
+    if c == "kind":
+        return T(((r.get("kind") or DASH)[:5], "dim"))
     if c == "lv":
-        return T(num(r.get("levels"), "{}"))
+        return T(P(r.get("levels"), "{}"))
+    if c == "k":
+        return T(P(r.get("k"), "{:g}"))
+    if c == "step":
+        return T(P(r.get("step_pct"), "{:.1f}"))
+    if c == "net":
+        return T(P(r.get("net_pct"), "{:.1f}"))
+    if c == "fd":
+        return T(P(r.get("fills_day"), "{:.1f}"))
+    if c == "rtd":
+        return T(P(r.get("rt_day"), "{:.1f}"))
     if c == "yd":
-        return T(num(r.get("yield_day"), "{:.2f}"))
-    if c == "ydo":
-        return T(num(r.get("oos_yield_day"), "{:.2f}"))
+        return T(P(r.get("yield_day")))
+    if c == "adj":
+        return T(P(r.get("yield_adj")))
     if c == "cont":
-        return T(num(r.get("cont"), "{:.2f}"))
-    if c == "conto":
-        a, b = r.get("cont"), r.get("oos_cont")
-        return T(num(a, "{:.2f}"), ("/", "dim"), num(b, "{:.2f}"))
-    if c == "dd":
-        return T(num(r.get("inv_dd_pct"), "{:.1f}"))
+        return T(P(r.get("cont")))
+    if c == "mae":
+        return T(P(r.get("mae_pct"), "{:.0f}"))
+    if c == "vr":
+        return T(P(r.get("vr")))
+    if c == "h":
+        return T(P(r.get("hurst")))
+    if c == "atr":
+        return T(P(r.get("atr_pct"), "{:.1f}"))
+    if c == "liq":
+        v = r.get("turnover24")
+        return T((f"{v / 1e6:.1f}M" if v is not None else DASH, "predicted" if v is not None else "dim"))
+    if c == "spr":
+        return T(P(r.get("spread_pct")))
+    if c == "d5":
+        return T(P(r.get("days_to_5pct"), "{:.1f}"))
     if c == "flag":
-        return T((r.get("boundary") or "", "warn"))
+        return T(("basket" if r.get("basket") else "", "warn"))
     if c == "q":
         return T((G["fresh"], "ok")) if r.get("qualified") else T(" ")
     return T("")
 
 
-def rejected_line(V):
-    rej = V.orc_rejects
-    if rej is None:
-        return T(("rejected ", "dim"), (DASH, "dim"), ("  (not in scan.json)", "dim"))
-    total = sum(rej.values())
-    parts = [("rejected ", "dim"), (f"{total}", "predicted"), (":", "dim")]
-    for why, n in sorted(rej.items(), key=lambda kv: -kv[1]):
-        parts += [(f" {why} ", "dim"), (str(n), "predicted"), (" ·", "frame")]
-    return T(*parts[:-1] if len(parts) > 3 else parts)
+def rejected_lines(V, inner_w):
+    """The scanner's own reasons, from scanner.log. Two lines at most."""
+    out = []
+    if V.gates:
+        out.append(T(("gates ", "dim"), (V.gates.replace("│", "·"), "dim")))
+    if not V.rejects:
+        why = "(scanner.log unread)" if V.n_rejected is None else "none this scan"
+        out.append(T(("rejected ", "dim"), (why, "dim")))
+        return out
+    parts = [("rejected ", "dim"), (str(V.n_rejected), "warn"), ("  ", "")]
+    for rj in V.rejects:
+        parts += [(f"{rj['why']}: ", "dim"), (" ".join(base(p) for p in rj["pairs"]), "predicted"), ("  ·  ", "frame")]
+    out.append(T(*parts[:-1]))
+    return out
 
 
 def oracle_panel(V, mode, width, height, ui, top_n=None):
     inner_w, inner_h = max(0, width - 2), max(0, height - 2)
-    cols, band_w = oracle_columns(mode, inner_w)
+    cols, band_w = oracle_columns(inner_w)
     rows = V.orc_rows[:top_n] if top_n else V.orc_rows
-    n_fit = max(0, inner_h - 3)                    # header + rule + rejected
+    foot = rejected_lines(V, inner_w) if inner_h >= 8 else []
+    # The gates line is the first thing to give way to a ranked row.
+    if len(foot) == 2 and inner_h - 2 - len(foot) < len(rows):
+        foot = foot[1:]
+    n_fit = max(0, inner_h - 2 - len(foot))          # header + rule
     sel = min(max(0, ui.sel), max(0, len(rows) - 1))
     start = 0 if sel < n_fit else sel - n_fit + 1
+    live = {g["symbol"] for g in V.grids}
     tbl = Table(box=box.SIMPLE_HEAD, show_edge=False, expand=True, pad_edge=False,
                 padding=(0, 0), header_style="dim", border_style="frame")
     for c in cols:
@@ -471,149 +545,280 @@ def oracle_panel(V, mode, width, height, ui, top_n=None):
         else:
             tbl.add_column(h, width=w, justify=j, no_wrap=True, overflow="crop")
     for i in range(start, min(len(rows), start + n_fit)):
+        r = rows[i]
         is_sel = i == sel and ui.view == "main"
-        tbl.add_row(*[oracle_cell(c, i, rows[i], band_w, is_sel) for c in cols])
+        tbl.add_row(*[oracle_cell(c, i, r, band_w, is_sel, r.get("symbol") in live) for c in cols])
     body = [tbl] if inner_h >= 3 else []
     pad = n_fit - min(n_fit, max(0, len(rows) - start))
     body += [Text("")] * pad
     if not rows:
-        body = ([T(("  no oracle results yet", "dim"))] + [Text("")] * max(0, inner_h - 2))
-    body.append(rejected_line(V))
-    src = "" if any(r.get("price") for r in rows) else "  (scans.jsonl: no price)"
-    title = T(("ORACLE", "title"), (" · ranked by risk-adjusted yield", "dim"),
-              (src, "dim"), ("  stale" if V.scan_stale else "", "warn"))
+        body = [T(("  no scan yet", "dim"))] + [Text("")] * max(0, inner_h - 1 - len(foot))
+    body += foot
+    o = V.orc
+    title = T(("ORACLE ", "title"), (f"v{o.get('version') or DASH}", "predicted"),
+              (f" · {o.get('interval') or DASH} · ", "dim"),
+              (str(o.get("n_scanned") if o.get("n_scanned") is not None else DASH), "predicted"), (" ranked · ", "dim"),
+              (str(o.get("n_qualified") if o.get("n_qualified") is not None else DASH), "predicted"), (" qualified · ", "dim"),
+              (str(o.get("n_basket") if o.get("n_basket") is not None else DASH), "predicted"), (" basket", "dim"),
+              ("  · stale" if V.scan_stale else "", "warn"),
+              ("  · cyan pair = live grid", "dim") if width >= 120 else ("", ""))
     return Panel(Group(*body[-inner_h:] if inner_h else []), title=title, title_align="left",
                  border_style="frame", box=box.SQUARE, padding=(0, 0), height=height)
 
 
 # ------------------------------------------------------------ live grids --
-def grid_rows(g, mode, inner_w, strips_only):
-    levels, filled = g.get("levels") or 0, g.get("filled") or 0
-    if strips_only:
-        sw = max(3, min(22, inner_w - 16))
-        return [T((f"{base(g['pair']):<7}", "title"),
-                  glyph_text(glyphs.rung_strip(g.get("held_mask", filled), levels,
-                                               g.get("px_idx"), sw)),
-                  (f" {filled}/{levels}", "realised"))]
-    # Sized to the 44 cells the reference layout leaves a card: the spec's
-    # own column list fixes the oracle panel's width, so the card line is
-    # base symbol, basis@leverage, age, pred · real -- and the unit sits in
-    # the panel title. range is appended last so cropping it is silent.
-    basis, lev = g.get("yield_basis_usd"), g.get("leverage")
-    # Flags first, so a narrow card never crops them: a grid that is catching
-    # up, or has had no print for 10 min, cannot fill or exit on time.
+def ladder_text(g, inner_w):
+    """The resting ladder, low to high, with the price cursor in place:
+    0.2240B 0.2412B 0.2597○ ◆0.3010 0.3696S. Returns None if it cannot fit."""
+    lad = g.get("ladder")
+    if not lad:
+        return None
+    px = g.get("price")
+    parts = []
+    placed = px is None
+    for lv, side in lad:
+        if not placed and px is not None and px < lv:
+            parts.append((G["cursor"] + short_px(px), "cursor"))
+            placed = True
+        mark, style = {"BUY": ("B", "ok"), "SELL": ("S", "held")}.get(side, ("○", "dim"))
+        parts.append((short_px(lv) + mark, style))
+    if not placed:
+        parts.append((G["cursor"] + short_px(px), "cursor"))
+    total = sum(len(p[0]) for p in parts) + len(parts) - 1
+    if total > inner_w:
+        return None
+    t = T()
+    for i, p in enumerate(parts):
+        if i:
+            t.append(" ")
+        t.append(p[0], style=p[1])
+    return t
+
+
+def grid_flags(g):
     pa = g.get("last_print_age_s")
-    flag = (" SYNC" if g.get("catching_up")
-            else (f" QUIET {pa / 60:.0f}m" if pa is not None and pa > 600 else ""))
-    row1 = T((f"{base(g['pair']):<6}", "title"), (flag, "warn"),
-             (f" ${basis:,.0f}" if basis is not None else f" {DASH}", "realised"),
-             (f"@{lev:g}x" if lev is not None else "", "realised"),
-             ("  ", ""), (fmt_span_min(g.get("uptime_min")), "realised"))
-    if mode.w in ("ref", "stacked"):
-        # Both printed from /api/grids as served -- predicted_yield_day and
-        # realised_yield_day are on one basis there (yield_basis_usd); the
-        # spec forbids recomputing either here. None is drawn as a dash: the
-        # executor sends None when the basis or deploy time is unknown, and
-        # that is not a measured zero.
-        py, ry = g.get("predicted_yield_day"), g.get("realised_yield_day")
-        row1.append_text(T(("  pred ", "dim"),
-                           (f"{py:.2f}" if py is not None else DASH, "predicted"),
-                           (" · real ", "dim"),
-                           (f"{ry:.2f}" if ry is not None else DASH,
-                            "realised" if ry is not None else "dim")))
-    if mode.w != "ref":     # 44 cells at the reference width: no room for it
-        row1.append_text(T(("  range ", "dim"), (g.get("range") or DASH, "realised")))
-    tail = T((f" {filled}/{levels} held", "realised"),
-             ("  cyc ", "dim"), (str(g.get("cycles", DASH)), "realised"),
-             ("  pnl ", "dim"), (signed_usd(g.get("pnl")), "realised"))
-    sw = max(8, min(22, inner_w - tail.cell_len))    # strip yields to the numbers
-    row2 = T(glyph_text(glyphs.rung_strip(g.get("held_mask", filled), levels,
-                                          g.get("px_idx"), sw)), tail)
-    return [row1, row2]
+    out = []
+    if g.get("catching_up"):
+        out.append(("SYNC", "warn"))
+    if g.get("outside_for_s") is not None:
+        out.append((f"OUTSIDE {fmt_dur(g['outside_for_s'])}", "danger"))
+    if pa is not None and pa > 600:
+        out.append((f"QUIET {fmt_dur(pa)}", "warn"))
+    return out
 
 
-def grids_panel(V, mode, width, height, strips=False):
-    inner_w, inner_h = max(0, width - 2), max(0, height - 2)
-    n = len(V.grids)
-    strips = strips or n * 2 > inner_h
-    lines = []
-    if not V.grids:
-        lines = [T(("── no grid ──", "dim"))]
+def grid_card(g, inner_w, lines):
+    """1, 2 or 3 lines per grid, most important first."""
+    n, held = g.get("levels") or 0, g.get("holding") or 0
+    ttf, note = g.get("time_to_first_rt_s"), g.get("first_rt_note")
+    first = fmt_dur(ttf) if ttf is not None else {"predates logging": "pre-log"}.get(note, note or DASH)
+    l1 = T((f"{g['symbol']:<10}", "title"))
+    for f, s in grid_flags(g):
+        l1.append_text(T((f + " ", s)))
+    l1.append_text(T((f"{(g.get('kind') or DASH)[:5]} {n}", "dim"), ("  ", ""),
+                     (usd(g.get("alloc"), 0), "realised"), ("  ", ""), (fmt_dur(g.get("age_s")), "realised"),
+                     ("  step ", "dim"), (pct(g.get("step_pct")), "predicted"),
+                     ("  pred ", "dim"), (num(g.get("predicted_yield_day")), "predicted"),
+                     (" real ", "dim"), (num(g.get("realised_yield_day")),
+                                         "realised" if g.get("realised_yield_day") is not None else "dim"),
+                     ("  RT ", "dim"), (str(g.get("round_trips") if g.get("round_trips") is not None else DASH), "realised"),
+                     ("  1st ", "dim"), (first, "realised" if ttf is not None else "dim")))
+    if lines == 1:
+        return [l1]
+    lad = ladder_text(g, inner_w - 12)
+    if lad is not None:
+        l2 = T(lad, (f"  {held}/{max(0, n - 1)} held", "realised"))
     else:
-        show = V.grids if n <= inner_h or not strips else V.grids[:max(0, inner_h - 1)]
-        for g in show:
-            lines += grid_rows(g, mode, inner_w, strips)
-        if len(show) < n:
+        sw = max(8, min(30, inner_w - 30))
+        l2 = T(glyph_text(glyphs.rung_strip(g.get("held_mask", held), n, g.get("px_idx"), sw)),
+               (f" {held}/{max(0, n - 1)} held  ", "realised"),
+               (f"{short_px(g.get('lo'))}–{short_px(g.get('hi'))}", "dim"),
+               ("  px ", "dim"), (short_px(g.get("price")), "realised"))
+    if lines == 2:
+        return [l1, l2]
+    # Floor/ceiling distance and the pierce loss live in the RISK cell.
+    l3 = T(("  pos ", "dim"), (pct(g["pos"] * 100, 0) if g.get("pos") is not None else DASH, "realised"),
+           ("  real ", "dim"), (signed_usd(g.get("realised")), pnl_style(g.get("realised"))),
+           ("  unreal ", "dim"), (signed_usd(g.get("unrealised")), pnl_style(g.get("unrealised"))),
+           ("  fees ", "dim"), (usd(g.get("fees")), "realised"),
+           ("  fills ", "dim"), (str(g.get("fills") if g.get("fills") is not None else DASH), "realised"),
+           ("  cash ", "dim"), (usd(g.get("cash"), 0), "realised"),
+           ("  oracle ", "dim"),
+           ({"qualified": "qualified", "ranked, not qualified": "ranked, unqual.", "not ranked": "not ranked"}
+            .get(g.get("scanner_now"), g.get("scanner_now") or DASH),
+            "ok" if g.get("scanner_now") == "qualified" else "warn"))
+    return [l1, l2, l3]
+
+
+def grids_panel(V, mode, width, height):
+    inner_w, inner_h = max(0, width - 2), max(0, height - 2)
+    S = V.S
+    n = len(V.grids)
+    lines = []
+    if S.get("unrestored"):
+        lines.append(T(("UNRESTORED ", "danger"), (", ".join(map(str, S["unrestored"])), "danger"),
+                       ("  slot, coins and capital held -- see gridbot.log", "dim")))
+    if not V.grids:
+        lines.append(T(("no running grids: waiting for a qualified pick that fits the capital", "dim")))
+    else:
+        avail = inner_h - len(lines)
+        per = 3 if n * 4 - 1 <= avail else (2 if n * 3 - 1 <= avail else (1 if n <= avail else 0))
+        if per == 0:
+            show = V.grids[:max(0, avail - 1)]
+            for g in show:
+                lines += grid_card(g, inner_w, 1)
             lines.append(T((f"+{n - len(show)} more", "dim")))
+        else:
+            for i, g in enumerate(V.grids):
+                if i and per > 1:
+                    lines.append(Text(""))
+                lines += grid_card(g, inner_w, per)
     lines = lines[:inner_h] + [Text("")] * max(0, inner_h - len(lines))
-    g, gs = fresh(V.grids_age)
-    title = T(("LIVE GRIDS ", "title"), (g, gs))
-    if mode.w in ("ref", "stacked") and not strips:
-        title.append_text(T(("  pred · real in %/d", "dim")))
+    g, gs = fresh(V.snap_age)
+    title = T(("LIVE GRIDS ", "title"), (g, gs),
+              (f"  {n}/{S.get('max_grids') or DASH}", "realised"),
+              ("  · yields %/d · ladder ", "dim"), ("B", "ok"), (" buy ", "dim"), ("S", "held"),
+              (" sell ", "dim"), ("○", "dim"), (" empty ", "dim"), (G["cursor"], "cursor"), (" price", "dim"))
     return Panel(Group(*lines) if lines else Text(""), title=title, title_align="left",
-                 border_style="frame", box=box.SQUARE, padding=(0, 0), height=height,
+                 border_style="frame", box=box.SQUARE, padding=(0, 1), height=height,
                  style="dim" if V.api_dead else "")
 
 
 # ----------------------------------------------------------- bottom band --
-def pierce_lines(V):
+def risk_lines(V):
     """Alerts first (the states where the bot stops trading but looks fine),
-    then GridBot's own edge figures (status.json), one line per grid."""
+    then the bot's own edge figures, then why picks were skipped."""
+    S = V.S
     out = []
-    if V.halt:
-        out.append(T(("HALT ", "danger"), (V.halt, "danger")))
-    if V.unrestored:
-        out.append(T(("UNRESTORED ", "danger"), (", ".join(map(str, V.unrestored)), "danger"),
-                      ("  slot held", "dim")))
-    if V.scanner_running is False:
-        out.append(T(("SCANNER DOWN ", "danger"), (V.scanner_note, "dim")))
-    elif V.scanner_note.startswith("scan is"):
-        out.append(T(("SCAN STALE ", "warn"), (V.scanner_note, "dim")))
-    if V.feed_connected is False:
-        out.append(T(("FEED DOWN ", "danger"), (V.feed_last_error, "dim")))
-    if V.gaps:
-        out.append(T(("catch-up gaps ", "warn"), (str(V.gaps), "warn")))
-    ea = f"{V.exit_after:.0f}s" if isinstance(V.exit_after, (int, float)) and V.exit_after > 0 else "never"
+    if S.get("halt"):
+        out.append(T(("HALT ", "danger"), (S["halt"], "danger")))
+    if S.get("scanner_running") is False:
+        out.append(T(("SCANNER DOWN ", "danger"), (S.get("scanner_note"), "dim")))
+    elif (S.get("scanner_note") or "").startswith("scan is"):
+        out.append(T(("SCAN STALE ", "warn"), (S.get("scanner_note"), "dim")))
+    if S.get("feed_connected") is False:
+        out.append(T(("FEED DOWN ", "danger"), (S.get("feed_last_error"), "dim")))
+    if S.get("catch_up_gaps"):
+        out.append(T(("catch-up gaps ", "warn"), (str(S["catch_up_gaps"]), "warn"),
+                     ("  prints lost: fills may be missing", "dim")))
+    ea = S.get("exit_after_s")
+    ea_s = f"{ea:.0f}s" if isinstance(ea, (int, float)) and ea > 0 else "never"
     for g in V.grids:
         f, c, fl = g.get("to_floor_pct"), g.get("to_ceiling_pct"), g.get("floor_pnl")
         near = f is not None and f < 3.0
-        out.append(T((f"{base(g['pair']):<6}", "title"),
-                     (" floor ", "dim"), (f"{f:.1f}%" if f is not None else DASH,
-                                          "danger" if near else "realised"),
-                     (" ceil ", "dim"), (f"{c:.1f}%" if c is not None else DASH, "realised"),
+        out.append(T((f"{base(g['symbol']):<6}", "title"),
+                     (" floor ", "dim"), (pct(f), "danger" if near else "realised"),
+                     (" ceil ", "dim"), (pct(c), "realised"),
                      (" @floor ", "dim"), (signed_usd(fl), "danger" if (fl or 0) < 0 else "realised")))
         if g.get("outside_for_s") is not None:
-            out.append(T(("  OUTSIDE band ", "danger"),
-                         (f"{g['outside_for_s']:.0f}s -> exit at {ea}", "danger")))
-    if not out:
-        out = [T(("no grid", "dim"))]
-    out.append(T(("skipped pairs  ", "dim"), (str(V.n_refused), "warn" if V.n_refused else "realised"),
-                 ("  (correlated / cooldown)" if V.n_refused else "", "dim")))
-    out.append(T(("mode  ", "dim"), (V.mode, "title")))
+            out.append(T(("  OUTSIDE band ", "danger"), (f"{fmt_dur(g['outside_for_s'])} -> exit at {ea_s}", "danger")))
+    sk = S.get("skipped") or {}
+    if sk:
+        out.append(T(("skipped picks ", "dim"), (str(len(sk)), "warn")))
+        for sym, why in list(sk.items())[:4]:
+            out.append(T((f"  {base(sym):<6} ", "title"), (str(why), "dim")))
+    else:
+        out.append(T(("skipped picks ", "dim"), ("0", "realised")))
+    if S.get("feed_last_error") and S.get("feed_connected"):
+        out.append(T(("last feed error ", "dim"), (S["feed_last_error"], "dim")))
     return out
 
 
 def pnl_lines(V, width):
-    sw = max(4, min(20, width - 14))
-    per = " · ".join(f"{base(g['pair'])} {signed_usd(g.get('pnl'))}" for g in V.grids) or DASH
-    return [
-        T((glyphs.spark(V.pnl_hist, sw), "realised"), ("  ", ""), (signed_usd(V.pnl), "realised")),
-        T(("realised ", "dim"), (signed_usd(V.realised), "realised"),
-          (" · unreal ", "dim"), (signed_usd(V.unrealised), "realised")),
-        T(("fees ", "dim"), (signed_usd(V.fees), "realised"),
-          (" · closed grids ", "dim"), (str(V.closed_n) if V.closed_n is not None else DASH, "realised")),
-        T(("per grid  ", "dim"), (per, "realised")),
-        T(("spark: this session, 1 sample/poll", "dim")),
+    S = V.S
+    sw = max(4, min(24, width - 14))
+    per = T()
+    for i, g in enumerate(V.grids):
+        if i:
+            per.append(" · ", style="dim")
+        per.append(base(g["symbol"]) + " ", style="title")
+        per.append(signed_usd(g.get("total")), style=pnl_style(g.get("total")))
+    def n_(v):
+        return str(v) if v is not None else DASH
+
+    out = [
+        T((glyphs.spark(V.pnl_hist, sw), "realised"), ("  ", ""),
+          (signed_usd(S.get("total_pnl")), pnl_style(S.get("total_pnl"))), ("  session", "dim")),
+        T(("        real     unreal    fees   fills  RT", "dim")),
+        T(("open   ", "dim"), (f"{signed_usd(S.get('open_realised')):>7}", pnl_style(S.get("open_realised"))),
+          (f"  {signed_usd(S.get('unrealised')):>8}", pnl_style(S.get("unrealised"))),
+          (f"  {usd(S.get('open_fees')):>6}", "realised"),
+          (f"  {n_(S.get('open_fills')):>5}", "realised"), (f"  {n_(S.get('open_round_trips')):>3}", "realised")),
+        T(("closed ", "dim"), (f"{signed_usd(S.get('closed_realised')):>7}", pnl_style(S.get("closed_realised"))),
+          (f"  {DASH:>8}", "dim"),
+          (f"  {usd(S.get('closed_fees')):>6}", "realised"),
+          (f"  {n_(S.get('closed_fills')):>5}", "realised"), (f"  {n_(S.get('closed_round_trips')):>3}", "realised")),
+        T(("grids  ", "dim"), per if V.grids else T((DASH, "dim"))),
     ]
+    for c in (S.get("recent_closed") or [])[-3:][::-1]:
+        out.append(T(("  ", ""), (f"{base(c.get('symbol')):<6}", "title"), (" closed ", "dim"),
+                     (signed_usd(c.get("realised")), pnl_style(c.get("realised"))),
+                     (f"  {c.get('round_trips', DASH)} RT · ", "dim"), (str(c.get("close_reason") or DASH), "dim")))
+    return out
+
+
+_TAPE_STYLE = {"FILL": "realised", "DEPLOY": "title", "EXIT": "warn", "FIRST_RT": "ok",
+               "HALT": "danger", "START": "dim", "STOP": "dim"}
+
+
+def tape_line(r, today=""):
+    ev = r.get("event", "?")
+    full = str(r.get("ts", ""))
+    # Rows from another day carry their date: a tape spanning two days with
+    # bare clock times reads as out of order.
+    ts = full[11:19] if full[:10] == today else full[5:16]
+    st = _TAPE_STYLE.get(ev, "dim")
+    sym = base(r.get("symbol")) if r.get("symbol") else ""
+    if ev == "FILL":
+        side = r.get("side", "")
+        pnl = r.get("pnl")
+        return T((ts + " ", "dim"), (f"{sym:<6}", "title"), (f"{side:<4} ", "ok" if side == "BUY" else "held"),
+                 (f"L{r.get('level', '?')} @", "dim"), (short_px(r.get("price")), "realised"),
+                 (f"  {signed_usd(pnl)}" if pnl is not None else "", pnl_style(pnl)))
+    if ev == "DEPLOY":
+        return T((ts + " ", "dim"), (f"{sym:<6}", "title"), ("DEPLOY ", st),
+                 (f"{(r.get('kind') or '')[:5]} {r.get('levels', '?')} ", "dim"),
+                 (f"{short_px(r.get('lo'))}–{short_px(r.get('hi'))}", "predicted"),
+                 (" @", "dim"), (short_px(r.get("price")), "realised"),
+                 (f"  {r.get('buys', '?')}B/{r.get('sells', '?')}S", "dim"))
+    if ev == "FIRST_RT":
+        return T((ts + " ", "dim"), (f"{sym:<6}", "title"), ("1st RT ", st),
+                 ("after ", "dim"), (fmt_dur(r.get("since_deploy_s")), "realised"),
+                 (f"  {r.get('fills', '?')} fills", "dim"),
+                 (f"  pred {r['predicted_fills_day']:.1f}/d" if isinstance(r.get("predicted_fills_day"), (int, float)) else "", "predicted"))
+    if ev == "EXIT":
+        return T((ts + " ", "dim"), (f"{sym:<6}", "title"), ("EXIT ", st),
+                 (signed_usd(r.get("realised")), pnl_style(r.get("realised"))),
+                 (f"  {r.get('round_trips', '?')} RT · ", "dim"), (str(r.get("close_reason") or ""), "dim"))
+    if ev == "HALT":
+        return T((ts + " ", "dim"), ("HALT ", st), (str(r.get("reason") or ""), "dim"))
+    if ev in ("START", "STOP"):
+        gl = r.get("grids") or []
+        return T((ts + " ", "dim"), (ev + " ", st), (" ".join(base(s) for s in gl), "dim"))
+    return T((ts + " ", "dim"), (f"{sym:<6}", "title"), (ev, st))
+
+
+def tape_lines(V, n, trading_only=False):
+    rows = V.journal
+    if trading_only:                 # the small cell: START/STOP restarts are noise there
+        rows = [r for r in rows if r.get("event") not in ("START", "STOP")]
+    rows = rows[-n:] if n > 0 else []
+    lines = [tape_line(r, V.today) for r in rows]
+    return [Text("")] * max(0, n - len(lines)) + lines          # newest at bottom
+
+
+_FILL_RE = re.compile(r" (BUY|SELL) L\d+ @|first round trip|^EXIT |restored|started:|HALT")
 
 
 def log_line(s):
     m = re.match(r"(\d\d:\d\d:\d\d) \[(\w+)\] (.*)", s)
     if not m:
         return T((s, "dim"))
-    lvl = m.group(2)
-    style = {"ERROR": "danger", "CRITICAL": "danger", "WARNING": "warn"}.get(lvl, "realised")
-    return T((m.group(1) + "  ", "dim"), (m.group(3), style))
+    lvl, msg = m.group(2), m.group(3)
+    style = {"ERROR": "danger", "CRITICAL": "danger", "WARNING": "warn"}.get(lvl)
+    if style is None:
+        style = "title" if _FILL_RE.search(msg) else ("dim" if "trade feed" in msg or "caught up" in msg else "realised")
+    return T((m.group(1) + "  ", "dim"), (msg, style))
 
 
 def log_lines(V, n):
@@ -621,13 +826,15 @@ def log_lines(V, n):
     return [Text("")] * max(0, n - len(lines)) + lines          # newest at bottom
 
 
-def cell(title, lines, height, age=None):
+def cell(title, lines, height, age=None, sub=None):
     inner = max(0, height - 2)
     lines = lines[:inner] + [Text("")] * max(0, inner - len(lines))
     t = T((title, "title"))
     if age is not None:
         g, gs = fresh(age)
         t.append(" " + g, style=gs)
+    if sub:
+        t.append("  " + sub, style="dim")
     return Panel(Group(*lines), title=t, title_align="left", border_style="frame",
                  box=box.SQUARE, padding=(0, 1), height=height)
 
@@ -635,14 +842,30 @@ def cell(title, lines, height, age=None):
 def bottom_band(V, mode, width, height):
     inner = height - 2
     lay = Layout(size=height, name="bottom")
-    if mode.w in ("ref", "narrow"):
+    if mode.w == "wide":
+        w1 = max(44, int(width * 0.25))
+        w2 = max(44, int(width * 0.25))
+        w3 = max(34, int(width * 0.24))
+        lay.split_row(Layout(cell("RISK", risk_lines(V)[:inner], height), size=w1),
+                      Layout(cell("P/L", pnl_lines(V, w2 - 4)[:inner], height), size=w2),
+                      Layout(cell("TAPE", tape_lines(V, inner, True), height, sub="t = all rows"), size=w3),
+                      Layout(cell("GRIDBOT LOG", log_lines(V, inner), height, V.snap_age), ratio=1))
+    elif mode.w == "ref":
+        # Three cells: the log is mostly feed reconnect noise and has its own
+        # screen (l); the tape does not.
+        w1 = max(44, int(width * 0.32))
+        w2 = max(44, int(width * 0.33))
+        lay.split_row(Layout(cell("RISK", risk_lines(V)[:inner], height), size=w1),
+                      Layout(cell("P/L", pnl_lines(V, w2 - 4)[:inner], height), size=w2),
+                      Layout(cell("TAPE", tape_lines(V, inner, True), height, sub="t = all · l = log"), ratio=1))
+    elif mode.w == "narrow":
         pw = width // 3
-        lay.split_row(Layout(cell("PIERCE / RISK", pierce_lines(V)[:inner], height), size=pw),
-                      Layout(cell("P/L", pnl_lines(V, pw - 4)[:inner], height), size=pw),
+        lay.split_row(Layout(cell("RISK", risk_lines(V)[:inner], height), size=pw),
+                      Layout(cell("TAPE", tape_lines(V, inner, True), height), size=pw),
                       Layout(cell("GRIDBOT LOG", log_lines(V, inner), height, V.snap_age), ratio=1))
     else:
         pw = width // 2
-        lay.split_row(Layout(cell("PIERCE / RISK", pierce_lines(V)[:inner], height), size=pw),
+        lay.split_row(Layout(cell("RISK", risk_lines(V)[:inner], height), size=pw),
                       Layout(cell("GRIDBOT LOG", log_lines(V, inner), height, V.snap_age), ratio=1))
     return lay
 
@@ -652,14 +875,13 @@ def footer(V, ui, log_in_footer, width):
     keys = T(("q", "title"), (" quit · ", "dim"), ("r", "title"), (" reread · ", "dim"),
              ("p", "title"), (" pause · ", "dim"), ("↑↓", "title"), (" select · ", "dim"),
              ("enter", "title"), (" detail · ", "dim"), ("l", "title"), (" log · ", "dim"),
-             ("?", "title"), (" help", "dim"),
+             ("t", "title"), (" tape · ", "dim"), ("?", "title"), (" help", "dim"),
              ("   PAUSED" if ui.paused else "", "warn"))
     if width >= 110:
-        legend = T(("  data ", "dim"), (G["fresh"] + "fresh ", "ok"),
-                   (G["stale"] + "stale >12s ", "warn"), (G["dead"] + "dead >30s", "danger"))
+        legend = T(("  amber ", "predicted"), ("scanner · ", "dim"), ("cyan ", "realised"), ("bot · ", "dim"),
+                   (G["fresh"] + "fresh ", "ok"), (G["stale"] + ">12s ", "warn"), (G["dead"] + ">30s", "danger"))
     else:
-        legend = T(("  ", ""), (G["fresh"] + "ok ", "ok"), (G["stale"] + ">12s ", "warn"),
-                   (G["dead"] + ">30s", "danger"))
+        legend = T(("  ", ""), (G["fresh"] + "ok ", "ok"), (G["stale"] + ">12s ", "warn"), (G["dead"] + ">30s", "danger"))
     g = Table.grid(expand=True)
     g.add_column(ratio=1, no_wrap=True, overflow="crop")
     g.add_column(width=legend.cell_len, no_wrap=True, justify="right")
@@ -672,25 +894,29 @@ def footer(V, ui, log_in_footer, width):
 
 HELP = [
     ("q / Ctrl-C", "quit (alternate screen: your shell is left as it was)"),
-    ("r", "re-read the oracle's output now. The console never scans Kraken itself."),
+    ("r", "re-read scan.json and scanner.log now. The console never scans Kraken itself."),
     ("p", "pause / resume polling"),
     ("↑ ↓", "select an oracle row"),
-    ("enter", "oracle detail() for the selected pair"),
+    ("enter", "the scanner's own detail() for the selected pair"),
     ("l", "gridbot.log, full width"),
+    ("t", "the tape (journal.jsonl), full width"),
     ("esc", "back"),
     ("", ""),
-    ("amber", "predicted: oracle numbers (Y/D, OOS, k, LV, CONT, DD%)"),
-    ("cyan", "realised: GridBot numbers from status.json (pnl, cycles, held)"),
-    (DASH, "not in status.json / scan.json -- shown empty, never derived"),
-    ("strip", "▓ rung holding coins (a resting SELL), ░ rung holding cash, ◆ price"),
-    ("card", "$alloc per grid; pred/real %/d as status.json serves them"),
-    ("reserved", "deployed / capital, from status.json"),
-    ("next ~", "scan age vs --refresh (default 120s, the launcher's GP_REFRESH)"),
+    ("HEADER", "bot · feed · scanner liveness; capital deployed; the book; the guard in its own units"),
+    ("LIVE GRIDS", "one card per grid: identity · yield pred/real · RT · time to 1st RT / ladder / edge and P/L"),
+    ("ladder", "B resting buy (cash)  S resting sell (coins)  ○ the one empty rung  ◆ last print"),
+    ("ORACLE", "scan.json as ranked. STEP/NET % per rung, F/d fills, RT/d round trips, Y/D yield, ADJ risk-adj,"),
+    ("", "CONT containment, MAE inventory %, VR variance ratio, H Hurst, ATR%, LIQ $M/24h, SPR spread %, D5 days to 5%"),
+    ("gates/rejected", "from scanner.log: the gates in force and why pairs were dropped"),
+    ("RISK", "floor/ceiling distance and the loss a floor pierce would lock in; skipped picks with reasons"),
+    ("TAPE", "journal rows: DEPLOY, FILL, 1st RT (time to first round trip), EXIT, HALT, START, STOP"),
+    ("amber / cyan", "scanner (predicted) numbers / bot (realised) numbers. — = not served, never derived"),
+    ("pred vs real", "the scanner's yield_day is a replay count, not a forecast (audit 2026-09-23); real is measured"),
 ]
 
 
 def help_panel(height):
-    lines = [T((f"{k:<11}", "title"), (v, "dim")) for k, v in HELP]
+    lines = [T((f"{k:<15}", "title"), (v, "dim")) for k, v in HELP]
     return cell("HELP", lines, height)
 
 
@@ -700,6 +926,7 @@ def detail_panel(V, ui, width, height, oracle_meta):
         return cell("DETAIL", [T(("no oracle row selected", "dim"))], height)
     r = rows[min(ui.sel, len(rows) - 1)]
     inner_w = max(10, width - 4)
+    lines = []
     if r.get("full"):
         try:
             cfg = glyphs._oracle.Cfg(fee=oracle_meta.get("fee_pct") or 0.22,
@@ -711,12 +938,10 @@ def detail_panel(V, ui, width, height, oracle_meta):
                      for ln in buf.getvalue().splitlines()]
             return cell(f"DETAIL · {r['symbol']}", lines, height)
         except Exception as e:
-            err = f"detail() failed: {type(e).__name__}: {e}"
-        lines = [T((err, "danger"))]
-    else:
-        lines = [T(("scans.jsonl row -- the oracle's full detail() needs --oracle-json", "dim"))]
-    for k in ("symbol", "yield_day", "oos_yield_day", "cont", "oos_cont", "inv_dd_pct",
-              "lo", "hi", "k", "levels", "qualified", "boundary"):
+            lines = [T((f"detail() failed: {type(e).__name__}: {e}", "danger"))]
+    for k in ("symbol", "kind", "levels", "lo", "hi", "center", "step_pct", "net_pct", "fills_day", "rt_day",
+              "yield_day", "yield_adj", "cont", "mae_pct", "vr", "hurst", "atr_pct", "turnover24",
+              "spread_pct", "days_to_5pct", "corr_top", "qualified", "basket"):
         v = r.get(k)
         lines.append(T((f"{k:<15}", "dim"), (DASH if v is None else str(v), "predicted")))
     return cell(f"DETAIL · {r.get('symbol')}", lines, height)
@@ -733,15 +958,13 @@ def build_frame(st, width, height, ui=None):
 
     head_h = min(HEAD_H, height)
     left = height - head_h
-    # single column wants a 3-line log panel; below that the log is one
-    # footer line, like every other layout under 28 rows.
     log_panel_h = 5 if single and left >= 1 + 5 + 4 + 6 else 0
     foot_h = min(left, 2 if (mode.h == "tiny" and not log_panel_h) else 1)
     left -= foot_h
     bot_h = 0
-    if not single and ui.view != "log":
-        bot_h = {"full": 7, "short": 3, "tiny": 0}[mode.h]
-        bot_h = bot_h if left - bot_h >= 8 else 0
+    if not single and ui.view == "main":
+        bot_h = {"tall": 10, "full": 8, "short": 4, "tiny": 0}[mode.h]
+        bot_h = bot_h if left - bot_h >= 10 else 0
     left -= bot_h + log_panel_h
     mid_h = max(0, left)
 
@@ -754,21 +977,21 @@ def build_frame(st, width, height, ui=None):
             mid.update(detail_panel(V, ui, width, mid_h, st.get("oracle") or {}))
         elif ui.view == "log":
             mid.update(cell("GRIDBOT LOG", log_lines(V, mid_h - 2), mid_h, V.snap_age))
-        elif mode.w in ("ref", "narrow"):
-            gw = max(46, int(width * 0.33))
+        elif ui.view == "tape":
+            mid.update(cell("TAPE", tape_lines(V, mid_h - 2), mid_h, sub="journal.jsonl, newest at the bottom"))
+        elif mode.w in ("wide", "ref", "narrow"):
+            gw = max(84, int(width * 0.46)) if mode.w == "wide" else max(48, int(width * 0.36))
             ow = width - gw
             mid.split_row(Layout(oracle_panel(V, mode, ow, mid_h, ui), size=ow),
                           Layout(grids_panel(V, mode, gw, mid_h), ratio=1))
         else:
             n = len(V.grids)
-            want = 2 + max(1, n if single else 2 * n)
-            gh = min(want, max(3, mid_h // 3))
+            want = 2 + max(1, n if single else 3 * n)
+            gh = min(want, max(3, mid_h // 2))
             oh = mid_h - gh
             oracle = oracle_panel(V, mode, width, oh, ui, top_n=5 if single else None)
-            mid.split_column(Layout(grids_panel(V, mode, width, gh, strips=single), size=gh),
-                             Layout(oracle, size=oh)) if single else \
-                mid.split_column(Layout(oracle, size=oh),
-                                 Layout(grids_panel(V, mode, width, gh), size=gh))
+            mid.split_column(Layout(grids_panel(V, mode, width, gh), size=gh),
+                             Layout(oracle, size=oh))
         parts.append(mid)
     if bot_h:
         parts.append(bottom_band(V, mode, width, bot_h))
@@ -826,6 +1049,8 @@ class App:
         self.status = feeds.StatusFeed(args.status)
         self.oracle = feeds.OracleFeed(json_path=args.oracle_json)
         self.log = feeds.LogFeed(args.log)
+        self.journal = feeds.JournalFeed(args.journal)
+        self.scanner_log = feeds.ScannerLogFeed(args.scanner_log)
         self.refresh = args.refresh
         self.ui = UI()
         self.pnl_hist = []
@@ -836,15 +1061,15 @@ class App:
         self._last_pnl_id = None
 
     def poll_once(self):
-        for f in (self.status, self.oracle, self.log):
+        for f in (self.status, self.oracle, self.log, self.journal, self.scanner_log):
             f.poll()
         with self.lock:
             pnl = self.status.snapshot.get("total_pnl")
             if self.status.age_s < STALE_S and pnl is not None and id(self.status.data) != self._last_pnl_id:
                 self._last_pnl_id = id(self.status.data)      # one sample per status write
                 self.pnl_hist = (self.pnl_hist + [pnl])[-240:]
-            sig = (id(self.status.data), id(self.oracle.data), id(self.log.data),
-                   len(self.pnl_hist), int(self.status.age_s))
+            sig = (id(self.status.data), id(self.oracle.data), id(self.log.data), id(self.journal.data),
+                   id(self.scanner_log.data), len(self.pnl_hist), int(self.status.age_s))
             if sig != self._sig:
                 self._sig = sig
                 self.dirty.set()
@@ -861,12 +1086,16 @@ class App:
             return {
                 "now": datetime.now(timezone.utc),
                 "snapshot": self.status.snapshot, "snapshot_age": self.status.age_s,
-                "grids": self.status.grids, "grids_age": self.status.age_s,
+                "grids": self.status.grids,
                 "oracle": self.oracle.data,
                 "oracle_scan_age": self.oracle.scan_age_s(),
                 "refresh_s": self.refresh,
                 "log": (self.log.data or {}).get("lines", []),
+                "journal": (self.journal.data or {}).get("rows", []),
+                "scanner_log": self.scanner_log.data,
+                "scanner_log_age": self.scanner_log.age_s,
                 "pnl_hist": list(self.pnl_hist),
+                "today": datetime.now().strftime("%Y-%m-%d"),     # journal ts are local
             }
 
     def key(self, k):
@@ -886,11 +1115,14 @@ class App:
             ui.view = "main" if ui.view == "help" else "help"
         elif k == "l":
             ui.view = "main" if ui.view == "log" else "log"
+        elif k == "t":
+            ui.view = "main" if ui.view == "tape" else "tape"
         elif k == "p":
             ui.paused = not ui.paused
         elif k == "r":
             self.oracle.reload()
-            threading.Thread(target=self.oracle.poll, daemon=True).start()
+            self.scanner_log._mtime = None
+            threading.Thread(target=lambda: (self.oracle.poll(), self.scanner_log.poll()), daemon=True).start()
         return True
 
 
@@ -899,6 +1131,8 @@ def parse_args(argv=None):
     p.add_argument("--status", default=None, help="GridBot status.json (default: next to gridbot.py)")
     p.add_argument("--oracle-json", default=None, help="the scanner's scan.json (default: next to gridbot.py)")
     p.add_argument("--log", default=None, help="GridBot log (default: gridbot.log)")
+    p.add_argument("--journal", default=None, help="GridBot journal (default: journal.jsonl)")
+    p.add_argument("--scanner-log", default=None, help="scanner output (default: scanner.log)")
     p.add_argument("--refresh", type=int, default=int(os.environ.get("GP_REFRESH", "120")),
                    help="oracle refresh seconds, for 'next scan' and staleness")
     p.add_argument("--exit-after", type=float, default=None,
@@ -922,9 +1156,8 @@ def main(argv=None):
         stop_file.unlink()          # a stale request must not quit a fresh console
     except OSError:
         pass
-    # Same scar as the oracle's main(): a redirected stdout on Windows
-    # defaults to cp1252 and the box glyphs would raise. A real console
-    # goes through WriteConsoleW and is unaffected either way.
+    # A redirected stdout on Windows defaults to cp1252 and the box glyphs
+    # would raise. A real console goes through WriteConsoleW either way.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
@@ -983,7 +1216,8 @@ def main(argv=None):
     if args.exit_after:
         print(f"lattice: {frames} frames in {time.monotonic() - t_start:.1f}s, "
               f"{console.size.width}x{console.size.height}, status err={app.status.error}, "
-              f"scan err={app.oracle.error}, log err={app.log.error}")
+              f"scan err={app.oracle.error}, log err={app.log.error}, journal err={app.journal.error}, "
+              f"scanner.log err={app.scanner_log.error}")
     return 0
 
 

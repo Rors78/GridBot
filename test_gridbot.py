@@ -607,6 +607,16 @@ check("FIRST_RT carries the exchange time of the first sell and the seconds sinc
 snap_rt = b_rt.snapshot()["grids"][0]
 check("status.json shows time_to_first_rt_s with no note",
       close(snap_rt["time_to_first_rt_s"], 70.0) and snap_rt["first_rt_note"] is None, snap_rt)
+lad = snap_rt["ladder"]
+g_rt = b_rt.grids["AAA/USD"]
+check("status.json serves the resting ladder: one entry per rung, prices = the grid's levels",
+      [p for p, _ in lad] == g_rt.levels, lad)
+check("exactly one empty rung; BUYs below it, SELLs above it",
+      [s for _, s in lad].count(None) == 1
+      and all(s == BUY for _, s in lad[:g_rt.empty]) and all(s == SELL for _, s in lad[g_rt.empty + 1:]), lad)
+check("cash, coins and deploy price are served for the console",
+      close(snap_rt["cash"], g_rt.cash) and close(snap_rt["base"], g_rt.base)
+      and snap_rt["deploy_px"] == g_rt.deploy_px)
 b_rt.close_grid("AAA/USD", "test")
 exit_rt = [x for x in (json.loads(x) for x in (tmp_rt / "journal.jsonl").read_text().splitlines())
            if x["event"] == "EXIT"][-1]

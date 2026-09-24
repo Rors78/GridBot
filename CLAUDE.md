@@ -72,8 +72,8 @@ first, python second. It matches on `D:\GridBot` paths, never on "python".
 | `gridbot.py` | Everything at runtime. `Grid` (pure engine, no I/O), `TradeFeed` (Kraken public WS + REST catch-up), `Scanner` (oracle.py child: start, hang detection, log rotation, kill-orphan), `Bot` (state, journal, status, guard, deploy/exit decisions). |
 | `oracle.py` | GridPick Oracle v3.1 scanner. **Read-only: do not modify.** The bot imports `oracle.make_levels` and `oracle.PairBook` so it trades exactly the ladder the scanner replayed. |
 | `test_gridbot.py` | Self-contained test runner (`check()` PASS/FAIL, exits 1 on any failure). Fakes every Kraken call. |
-| `tui/lattice.py` | The GRIDPICK LATTICE console (Rich Live). Read-only: reads status.json, scan.json, gridbot.log via `tui/feeds.py`. Never imports gridbot, never calls Kraken. |
-| `tui/feeds.py`, `glyphs.py`, `theme.py`, `sixelimg.py`, `assets/` | TUI data feeds, glyph map, theme, logo rendering. |
+| `tui/lattice.py` | The GRIDPICK LATTICE console (Rich Live). Read-only: reads status.json, scan.json, journal.jsonl, gridbot.log and scanner.log via `tui/feeds.py`. Never imports gridbot, never calls Kraken. Header = bot/feed/scanner liveness, capital, book, guard. Cards = one per grid with its resting ladder (B/S/○/◆). Oracle = every scan metric. Bottom = RISK, P/L, TAPE, LOG. Keys: enter detail, l log, t tape, ? help. Layouts at 176+/140/110/90 columns. |
+| `tui/feeds.py`, `glyphs.py`, `theme.py`, `sixelimg.py`, `assets/` | TUI data feeds (StatusFeed, OracleFeed, JournalFeed, LogFeed, ScannerLogFeed), glyph map, theme, logo rendering. Feeds pick values out; they never compute a trading quantity. |
 | `run.bat`, `run_gitbash.sh` | Restart loops (Windows / Git Bash). |
 | `launch.bat`, `gridbot_stop.ps1` | Kill-then-launch desktop entry point and its stopper. |
 | `audit/` | 2026-09-23 read-only audit: report + the replay scripts that produced it. Pickles are gitignored. |
