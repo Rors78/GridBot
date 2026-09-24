@@ -157,4 +157,14 @@ existing is not done; observable output in status.json is done.
   GridPick terminal profile has `closeOnExit: always`. The stop script also
   kills the Git Bash `run_gitbash.sh` loop, which it never matched before:
   a force-killed gridbot.py under that loop would have been respawned 15 s
-  later.
+  later. Every stop is logged to `launcher.log` with the Lattice's exit code;
+  read that before theorising about a window.
+- **A window that predates a launcher fix will not benefit from it.**
+  `closeOnExit` is resolved when the tab is created, so the one Lattice
+  window open before the profile change stayed open once more and had to be
+  closed by hand. Verified after: two consecutive shortcut launches kept the
+  window count at exactly one.
+- **Never edit launch.bat while a console is running from it.** cmd reads a
+  batch file by byte offset as it goes; an edit shifts the offsets under the
+  running copy and it does something else (a 3 s wait for it to end on its
+  own timed out during the 2026-09-24 repro). Stop, edit, relaunch.

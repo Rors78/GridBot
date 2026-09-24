@@ -24,6 +24,10 @@ title GridPick
 
 echo.
 echo   GridPick: stopping any running GridBot first
+:: The stopper appends everything it does to launcher.log; the Lattice's
+:: exit code is logged below. "The old window did not close" is otherwise
+:: undiagnosable once the window is gone.
+echo %date% %time% launch.bat %~1 start >> "%~dp0launcher.log"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gridbot_stop.ps1"
 if /i "%~1"=="stop" (
   %SystemRoot%\System32\timeout.exe /t 3 >nul
@@ -49,7 +53,8 @@ set PYTHONUTF8=1
 :loop
 python -X utf8 "%~dp0tui\lattice.py"
 set rc=%errorlevel%
-:: 0 = q pressed. Anything else is a crash worth retrying.
+echo %date% %time% lattice exited rc=%rc% >> "%~dp0launcher.log"
+:: 0 = q pressed or lattice.stop honoured. Anything else is a crash worth retrying.
 if not "%rc%"=="0" (
   echo.
   echo   GridPick Lattice exited with code %rc%. Restarting in 10s -- close this window to stop.

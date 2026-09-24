@@ -25,6 +25,13 @@ param([switch]$DryRun)
 $dir = 'D:\GridBot'
 $launchers = @("*$dir\run.bat*", "*$dir\launch.bat*", "*run_gitbash.sh*")
 
+# Every line also goes to launcher.log (open/close per line, ASCII: a Tee that
+# held the file open blocked launch.bat's own "lattice exited" echo).
+function Say($m) {
+    Write-Output $m
+    try { Add-Content -Path "$dir\launcher.log" -Encoding ascii -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch {}
+}
+
 # GRACEFUL FIRST (audit 2026-09-23): the journal showed 18 STARTs and 0 STOPs
 # -- every stop was a hard kill, so the bot's final save and STOP row never
 # ran. gridbot.py polls for stop.request every 0.5 s and exits with code 0
@@ -41,9 +48,9 @@ if (-not $DryRun) {
             Start-Sleep -Milliseconds 300
         }
         if ($alive) {
-            Write-Output "gridbot_stop: no clean stop within 12 s -- forcing"
+            Say "gridbot_stop: no clean stop within 12 s -- forcing"
         } else {
-            Write-Output "gridbot_stop: GridBot stopped cleanly"
+            Say "gridbot_stop: GridBot stopped cleanly"
         }
     }
 }
@@ -66,9 +73,21 @@ if (-not $DryRun) {
             if (-not $alive) { break }
             Start-Sleep -Milliseconds 200
         }
-        Start-Sleep -Milliseconds 500      # let launch.bat's cmd finish and the tab close
-        if ($alive) { Write-Output "gridbot_stop: Lattice did not quit within 6 s -- forcing" }
-        else { Write-Output "gridbot_stop: Lattice console closed cleanly" }
+        if ($alive) { Say "gridbot_stop: Lattice did not quit within 6 s -- forcing" }
+        else {
+            Say "gridbot_stop: Lattice console closed cleanly"
+            # Its launch.bat cmd now ends on its own (exit 0 -> the tab closes).
+            # Killing it first would turn that into a non-zero exit. Wait for
+            # it; anything still here after 3 s is force-killed below.
+            $hosts = @($consoles | ForEach-Object { [int]$_.ParentProcessId } | Select-Object -Unique)
+            $deadline = (Get-Date).AddSeconds(3)
+            while ((Get-Date) -lt $deadline) {
+                $left = @($hosts | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+                if (-not $left) { break }
+                Start-Sleep -Milliseconds 200
+            }
+            Say("gridbot_stop: old console host(s) {0}" -f $(if ($left) { "still alive: $($left -join ',')" } else { "ended on their own" }))
+        }
     }
     Remove-Item -Path "$dir\lattice.stop" -Force -ErrorAction SilentlyContinue
 }
@@ -116,21 +135,21 @@ foreach ($p in $all) {
 }
 
 if (-not $targets) {
-    Write-Output "gridbot_stop: nothing running"
+    Say "gridbot_stop: nothing running"
     exit 0
 }
 
 foreach ($p in $targets) {
     $what = ($p.CommandLine -replace '^.*[\\/]', '') -replace '"', ''
     if ($DryRun) {
-        Write-Output ("would stop  {0,-10} {1,6}  {2}" -f $p.Name, $p.ProcessId, $what)
+        Say("would stop  {0,-10} {1,6}  {2}" -f $p.Name, $p.ProcessId, $what)
         continue
     }
     try {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
-        Write-Output ("stopped     {0,-10} {1,6}  {2}" -f $p.Name, $p.ProcessId, $what)
+        Say("stopped     {0,-10} {1,6}  {2}" -f $p.Name, $p.ProcessId, $what)
     } catch {
-        Write-Output ("could not stop {0} {1}: {2}" -f $p.Name, $p.ProcessId, $_.Exception.Message)
+        Say("could not stop {0} {1}: {2}" -f $p.Name, $p.ProcessId, $_.Exception.Message)
     }
 }
 exit 0
