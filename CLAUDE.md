@@ -54,8 +54,12 @@ Non-goals: live trading, shorting, leverage, any API, any other bot.
     python -X utf8 gridbot.py --status      print status.json and exit
     python -X utf8 test_gridbot.py          tests (no network, temp dirs only)
 
-The desktop shortcut targets `launch.bat`. `startup_disabled\GridBot.lnk` is
-the Startup-folder shortcut, parked (not auto-started at boot).
+The desktop shortcut targets `launch.bat`. GridBot IS auto-started at boot:
+`Startup\GridBot.lnk` runs `D:\BotLaunch\launch_min.ps1 -Title GridBot -Dir D:\GridBot`,
+which opens a Git Bash tab running `run_gitbash.sh` (restart loop). The old parked
+`startup_disabled\GridBot.lnk` (pointed at run.bat) was moved to
+`D:\_backups\GridBot_audit_caches_2026-09-24\` on 2026-09-24, with the audit pickles,
+the `.pre-safety` copies and `audit/replay2/` (its RESULTS.md and rp.py were never in git).
 
 Exit codes from gridbot.py, honoured by run.bat / run_gitbash.sh:
 `0` clean stop, `2` could not start (see gridbot.log), `3` already running
