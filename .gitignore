@@ -1,0 +1,24 @@
+# --- runtime state: written by the bot every few seconds, never source ---
+state.json
+state.json.bak
+status.json
+journal.jsonl
+scan.json
+gridbot.lock
+scanner.pid
+*.log
+
+# --- python ---
+__pycache__/
+*.pyc
+
+# --- audit scratch: pickles (30 MB) and pre-safety copies ---
+audit/*.pkl
+audit/*.pre-safety
+audit/replay2/
+
+# --- desktop shortcut ---
+*.lnk
+
+# --- credentials live in the user environment only ---
+.env
