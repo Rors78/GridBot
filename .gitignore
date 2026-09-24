@@ -6,6 +6,7 @@ journal.jsonl
 scan.json
 gridbot.lock
 scanner.pid
+stop.request
 *.log
 
 # --- python ---
