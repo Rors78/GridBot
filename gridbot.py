@@ -110,6 +110,10 @@ class Grid:
         self.fees = 0.0
         self.fills = 0
         self.round_trips = 0
+        # Exchange time of the SELL that completed the first round trip.
+        # How long a fresh grid sits before it earns anything is the number
+        # the scanner's fill count cannot give (audit 2026-09-23).
+        self.first_rt_at: float | None = None
         self.net_fills = 0          # buys minus sells since deploy, in rungs
         self.status = "NEW"
         self.deployed_at: float | None = None
@@ -241,6 +245,8 @@ class Grid:
         pnl = proceeds - fee - (q * o["entry"] + o["entry_fee"])
         self.realised += pnl
         self.round_trips += 1
+        if self.round_trips == 1:
+            self.first_rt_at = ts
         self.orders[j] = None
         self.orders[self.empty] = {"side": BUY, "qty": self.rung / self.levels[self.empty]}
         self.empty = j
@@ -296,7 +302,19 @@ class Grid:
         g.close(px, (g.last_ts or 0.0) + 1.0, "what-if")
         return g.realised
 
+    def time_to_first_rt(self) -> tuple[float | None, str | None]:
+        """(seconds from deploy to the first completed round trip, note).
+        (None, "pending") while none has completed. (None, "predates logging")
+        for a restored grid that had round trips before this field existed:
+        an absent stamp is not the same as no round trip yet."""
+        if self.first_rt_at is not None and self.deployed_at is not None:
+            return self.first_rt_at - self.deployed_at, None
+        if self.round_trips > 0:
+            return None, "predates logging"
+        return None, "pending"
+
     def summary(self) -> dict:
+        ttf, ttf_note = self.time_to_first_rt()
         end = self.closed_at or self.last_ts or self.deployed_at
         days = ((end - self.deployed_at) / 86400.0) if (end and self.deployed_at) else None
         return {"symbol": self.symbol, "status": self.status, "kind": self.kind,
@@ -306,10 +324,12 @@ class Grid:
                 "close_reason": self.close_reason, "days": days,
                 "realised": self.realised, "fees": self.fees, "fills": self.fills,
                 "round_trips": self.round_trips,
+                "first_rt_at": self.first_rt_at, "time_to_first_rt_s": ttf,
+                "first_rt_note": ttf_note,
                 "predicted_yield_day": self.meta.get("yield_day")}
 
     _STATE = ("symbol", "key", "kind", "levels", "alloc", "meta", "orders", "empty",
-              "cash", "base", "realised", "fees", "fills", "round_trips", "net_fills",
+              "cash", "base", "realised", "fees", "fills", "round_trips", "first_rt_at", "net_fills",
               "status", "deployed_at", "deploy_px", "last_px", "last_ts",
               "last_trade_id", "outside_since", "exit_due", "gap_at", "gap_end", "closed_at", "close_px",
               "close_reason")
@@ -1379,6 +1399,7 @@ class Bot:
             g.exit_due = [g.last_px, g.outside_since + ea, why]
             self.dirty = True
             return
+        rt_before = g.round_trips
         try:
             fills = g.on_print(price, ts, trade_id)
         except AssertionError as e:
@@ -1393,6 +1414,13 @@ class Bot:
             self.journal("FILL", symbol=g.symbol, **row)
             pnl = f" {f['pnl']:+.4f}" if "pnl" in f else ""
             self.event(f"{g.symbol} {f['side']} L{f['level']} @ {oracle.fmt_px(f['price'])}{pnl}")
+        if rt_before == 0 and g.round_trips > 0 and g.first_rt_at is not None:
+            # Once per grid: how long the capital sat before its first earning.
+            since = g.first_rt_at - (g.deployed_at or g.first_rt_at)
+            self.journal("FIRST_RT", symbol=g.symbol, exch_ts=g.first_rt_at,
+                         since_deploy_s=since, fills=g.fills, deploy_px=g.deploy_px,
+                         price=price, predicted_fills_day=g.meta.get("fills_day"))
+            self.event(f"{g.symbol}: first round trip after {hms(since)} ({g.fills} fills)")
         # The exit timer runs in PRINT time, so a catch-up replaying an outage
         # exits where the market was when the timer ran out -- not at whatever
         # the price is by the time the bot is back, and not at a stale print.
@@ -1859,6 +1887,7 @@ class Bot:
                 real_yd = (g.realised / g.alloc * 100.0 / days) if days > 0.02 else None
                 scan_row = next((r for r in (self.scan or {}).get("results", [])
                                  if r.get("symbol") == s), None)
+                ttf, ttf_note = g.time_to_first_rt()
                 rows.append({
                     "symbol": s, "kind": g.kind, "levels": g.n, "lo": g.lo, "hi": g.hi,
                     "price": g.last_px, "pos": ((g.last_px - g.lo) / (g.hi - g.lo)) if g.last_px else None,
@@ -1874,6 +1903,7 @@ class Bot:
                     "catching_up": s in self.syncing,
                     "predicted_yield_day": g.meta.get("yield_day"),
                     "realised_yield_day": real_yd,
+                    "time_to_first_rt_s": ttf, "first_rt_note": ttf_note,
                     "scanner_now": ("qualified" if scan_row and scan_row.get("qualified")
                                     else ("ranked, not qualified" if scan_row else "not ranked")),
                 })

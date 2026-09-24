@@ -117,6 +117,12 @@ check("the sell one level up completes a round trip at 105", len(f) == 1 and f[0
 check("round-trip P/L = qty x step - maker on both legs", close(f[0]["pnl"], pnl), (f[0]["pnl"], pnl))
 check("realised booked", close(g.realised, pnl) and g.round_trips == 1)
 check("ladder shape and cash still hold", ladder_ok(g) and conserved(g))
+check("the first round trip is stamped at the sell's exchange time", g.first_rt_at == 1005, g.first_rt_at)
+check("time_to_first_rt = first sell - deploy, no note", g.time_to_first_rt() == (5.0, None), g.time_to_first_rt())
+g.on_print(103.99, 1006, 6)
+g.on_print(105.01, 1007, 7)
+check("a second round trip leaves the first stamp alone", g.round_trips == 2 and g.first_rt_at == 1005)
+check("a grid with no round trip yet reports pending", new_grid().time_to_first_rt() == (None, "pending"))
 
 g = new_grid()
 f = g.on_print(101.5, 1001, 1)
@@ -228,6 +234,17 @@ for i, p in enumerate([101.4, 107.9, 103.3]):
     if a != b:
         break
 check("a restored grid behaves identically", g.to_dict() == h.to_dict())
+old = new_grid()
+old.on_print(103.99, 1001, 1)
+old.on_print(105.01, 1002, 2)                # one round trip, stamped
+d_old = old.to_dict()
+del d_old["first_rt_at"]                     # a state.json saved before the field existed
+r_old = Grid.from_dict(d_old)
+check("a pre-logging grid with round trips restores as 'predates logging', not pending",
+      r_old.first_rt_at is None and r_old.time_to_first_rt() == (None, "predates logging"),
+      r_old.time_to_first_rt())
+check("the first-round-trip stamp survives save and restore",
+      Grid.from_dict(old.to_dict()).first_rt_at == 1002)
 
 # -----------------------------------------------------------------------------
 print("\n9. feasibility follows Kraken's minimums")
@@ -568,6 +585,32 @@ b.scan_note = "scan is 3h12m old -- no new grids until it refreshes " * 3
 text = b.render(b.snapshot())
 check("every rendered line fits 118 columns even during an outage",
       max(len(x) for x in text.splitlines()) <= 118, max(len(x) for x in text.splitlines()))
+
+# -----------------------------------------------------------------------------
+print("\n12b. first round trip is journalled once")
+tmp_rt = Path(tempfile.mkdtemp(prefix="gridbot_test_"))
+b_rt = make_bot(tmp_rt, max_grids="1")
+write_scan(tmp_rt, [scan_row("AAA/USD", 100, 110)])
+b_rt.skipped_gen = None
+b_rt.consider()
+t_rt = b_rt.grids["AAA/USD"].deployed_at
+b_rt.on_trade("AAA/USD", 103.99, t_rt + 10, 1)         # buy at 104
+b_rt.on_trade("AAA/USD", 105.01, t_rt + 70, 2)         # sell at 105: first round trip
+b_rt.on_trade("AAA/USD", 103.99, t_rt + 80, 3)
+b_rt.on_trade("AAA/USD", 105.01, t_rt + 90, 4)         # second round trip
+rows_rt = [json.loads(x) for x in (tmp_rt / "journal.jsonl").read_text().splitlines()]
+first = [x for x in rows_rt if x["event"] == "FIRST_RT"]
+check("exactly one FIRST_RT row after two round trips", len(first) == 1, len(first))
+check("FIRST_RT carries the exchange time of the first sell and the seconds since deploy",
+      first and first[0]["symbol"] == "AAA/USD" and first[0]["exch_ts"] == t_rt + 70
+      and close(first[0]["since_deploy_s"], 70.0) and first[0]["fills"] == 2, first)
+snap_rt = b_rt.snapshot()["grids"][0]
+check("status.json shows time_to_first_rt_s with no note",
+      close(snap_rt["time_to_first_rt_s"], 70.0) and snap_rt["first_rt_note"] is None, snap_rt)
+b_rt.close_grid("AAA/USD", "test")
+exit_rt = [x for x in (json.loads(x) for x in (tmp_rt / "journal.jsonl").read_text().splitlines())
+           if x["event"] == "EXIT"][-1]
+check("the EXIT row carries time_to_first_rt_s", close(exit_rt.get("time_to_first_rt_s", -1), 70.0), exit_rt)
 
 # -----------------------------------------------------------------------------
 print("\n13. records")
