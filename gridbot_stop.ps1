@@ -1,7 +1,8 @@
-# Stop every running GridBot process: the launcher windows (run.bat and
-# launch.bat) that hold the restart loop, gridbot.py, and its oracle.py
-# scanner. Used by launch.bat so the GridPick desktop shortcut is a
-# kill-then-launch: a click always ends with exactly one fresh bot.
+# Stop every running GridBot process: the launcher windows (run.bat,
+# run_gitbash.sh and launch.bat) that hold the restart loops, gridbot.py,
+# its oracle.py scanner, and any Lattice console. Used by launch.bat so the
+# GridPick desktop shortcut is a kill-then-launch: a click always ends with
+# exactly one fresh bot and no leftover window.
 #
 # ORDER MATTERS. gridbot.py sits inside run.bat's :loop, which restarts it
 # 15 s after a non-zero exit. Killing python first would just schedule a
@@ -22,7 +23,7 @@
 param([switch]$DryRun)
 
 $dir = 'D:\GridBot'
-$launchers = @("*$dir\run.bat*", "*$dir\launch.bat*")
+$launchers = @("*$dir\run.bat*", "*$dir\launch.bat*", "*run_gitbash.sh*")
 
 # GRACEFUL FIRST (audit 2026-09-23): the journal showed 18 STARTs and 0 STOPs
 # -- every stop was a hard kill, so the bot's final save and STOP row never
@@ -47,6 +48,31 @@ if (-not $DryRun) {
     }
 }
 
+# GRACEFUL FOR THE CONSOLE TOO. Windows Terminal keeps a tab open when its
+# process is killed ("[process exited with code -1]"), so every icon click
+# used to leave the previous Lattice window behind. lattice.py polls for
+# lattice.stop and exits 0; launch.bat's loop then ends and cmd exits 0,
+# which closes the tab. The file is removed afterwards either way so a
+# fresh console never quits on a stale request. Belt and braces: the
+# GridPick terminal profile also has closeOnExit "always".
+if (-not $DryRun) {
+    $consoles = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -like 'python*.exe' -and $_.CommandLine -like "*$dir\tui\lattice.py*" })
+    if ($consoles) {
+        Set-Content -Path "$dir\lattice.stop" -Value 'stop' -ErrorAction SilentlyContinue
+        $deadline = (Get-Date).AddSeconds(6)
+        while ((Get-Date) -lt $deadline) {
+            $alive = @($consoles | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+            if (-not $alive) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        Start-Sleep -Milliseconds 500      # let launch.bat's cmd finish and the tab close
+        if ($alive) { Write-Output "gridbot_stop: Lattice did not quit within 6 s -- forcing" }
+        else { Write-Output "gridbot_stop: Lattice console closed cleanly" }
+    }
+    Remove-Item -Path "$dir\lattice.stop" -Force -ErrorAction SilentlyContinue
+}
+
 $all = Get-CimInstance Win32_Process
 $byId = @{}
 foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
@@ -68,7 +94,7 @@ $launcherIds = @()
 $targets = @()
 foreach ($p in $all) {
     if ($protect -contains [int]$p.ProcessId) { continue }
-    if ($p.Name -eq 'cmd.exe' -and (Matches $p $launchers)) {
+    if (($p.Name -in 'cmd.exe', 'bash.exe', 'sh.exe') -and (Matches $p $launchers)) {
         $targets += $p
         $launcherIds += [int]$p.ProcessId
     }

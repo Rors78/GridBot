@@ -1,0 +1,6 @@
+# Everything is LF on disk. Python text-mode writes on Windows emit CRLF;
+# edit with newline="" or bytes. Git normalises either way.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.lnk binary

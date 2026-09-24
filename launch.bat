@@ -42,6 +42,7 @@ powershell -NoProfile -Command "Start-Process -FilePath '%~dp0run.bat' -WorkingD
 %SystemRoot%\System32\timeout.exe /t 4 >nul
 
 title GridPick Lattice
+if exist "%~dp0lattice.stop" del /q "%~dp0lattice.stop" >nul 2>&1
 mode con cols=140 lines=45 >nul 2>&1
 set PYTHONUTF8=1
 

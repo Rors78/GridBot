@@ -906,8 +906,22 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+STOP_FILE = "lattice.stop"      # written by gridbot_stop.ps1; consumed here, exit 0
+
+
+def stop_file_for(args) -> "Path":
+    """Next to the status.json this console reads (the GridBot folder by default)."""
+    from pathlib import Path
+    return (Path(args.status).resolve().parent if args.status else feeds.HERE) / STOP_FILE
+
+
 def main(argv=None):
     args = parse_args(argv)
+    stop_file = stop_file_for(args)
+    try:
+        stop_file.unlink()          # a stale request must not quit a fresh console
+    except OSError:
+        pass
     # Same scar as the oracle's main(): a redirected stdout on Windows
     # defaults to cp1252 and the box glyphs would raise. A real console
     # goes through WriteConsoleW and is unaffected either way.
@@ -927,6 +941,7 @@ def main(argv=None):
     threading.Thread(target=app.poller, daemon=True).start()
     keys = Keys()
     last_t, last_size, last_sec = 0.0, None, None
+    last_stop_check = None
     t_start, frames = time.monotonic(), 0
     try:
         with Live(Text(""), console=console, screen=True, auto_refresh=False,
@@ -949,6 +964,16 @@ def main(argv=None):
                     frames += 1
                 if args.exit_after and time.monotonic() - t_start >= args.exit_after:
                     break
+                # A kill leaves the Windows Terminal tab open ("process exited
+                # with code -1"); a clean exit 0 lets launch.bat end and the
+                # tab close. gridbot_stop.ps1 asks for that with this file.
+                if sec != last_stop_check and stop_file.exists():
+                    try:
+                        stop_file.unlink()
+                    except OSError:
+                        pass
+                    break
+                last_stop_check = sec
                 time.sleep(0.03)
     except KeyboardInterrupt:
         pass

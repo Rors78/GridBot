@@ -145,5 +145,16 @@ existing is not done; observable output in status.json is done.
   cached pair list however old, else retry with backoff.
 - **Fee tier sanity.** An implausible tier from TradeVolume (e.g. 38%) is
   refused and defaults kept (tested).
-- **Line endings.** `core.autocrlf=false` in this repo so Git never rewrites
-  files under the running bot.
+- **Line endings.** Everything is LF on disk, enforced by `.gitattributes`
+  (`* text=auto eol=lf`) and `core.autocrlf=false`. Python's text-mode
+  `write_text()` on Windows emits CRLF and turns a 10-line edit into a
+  whole-file diff (it happened to commit 5cf6d9c). Edit with `newline=""`
+  or bytes, and check `git diff --stat` before committing.
+- **Every icon click left the old Lattice window open.** Windows Terminal
+  keeps a tab whose process was killed ("[process exited with code -1]").
+  Fix: `gridbot_stop.ps1` writes `lattice.stop`, `tui/lattice.py` exits 0 on
+  it, launch.bat's loop ends, cmd exits 0, the tab closes. Backstop: the
+  GridPick terminal profile has `closeOnExit: always`. The stop script also
+  kills the Git Bash `run_gitbash.sh` loop, which it never matched before:
+  a force-killed gridbot.py under that loop would have been respawned 15 s
+  later.
