@@ -66,8 +66,9 @@ is a non-goal **until the go-live gate below is passed and Jeremy signs off**.
     python -X utf8 test_gridbot.py          tests (no network, temp dirs only)
 
 The desktop shortcut targets `launch.bat`. GridBot IS auto-started at boot:
-`Startup\GridBot.lnk` runs `D:\BotLaunch\launch_min.ps1 -Title GridBot -Dir D:\GridBot`,
-which opens a Git Bash tab running `run_gitbash.sh` (restart loop). The old parked
+the Scheduled Task `GridBot` (onlogon) runs `start_hidden.vbs` -> `run.bat`
+with no window, so no tab or console owns the bot (since 2026-09-24; the old
+`Startup\GridBot.lnk` -> Git Bash tab is in `D:\_backups\`). The old parked
 `startup_disabled\GridBot.lnk` (pointed at run.bat) was moved to
 `D:\_backups\GridBot_audit_caches_2026-09-24\` on 2026-09-24, with the audit pickles,
 the `.pre-safety` copies and `audit/replay2/` (its RESULTS.md and rp.py were never in git).
@@ -225,8 +226,9 @@ change itself: its own branch, reviewed, never a flag default.
   are on disk. Verified empirically by closing a live window. LOGOFF and
   SHUTDOWN are only reliably delivered to services, so a reboot may still be
   a hard kill: live mode must trust startup reconciliation, not this handler.
-  The remaining hole is the boot path -- the Startup shortcut's Git Bash tab
-  is the bot's parent, so closing that tab kills it. The replacement
-  (Scheduled Task `GridBot` -> `start_hidden.vbs`, no window, no parent to
-  close) needs a command Claude's harness will not run; see the 2026-09-24
-  session report.
+  The boot-path hole (the Startup shortcut's Git Bash tab was the bot's
+  parent: close the tab, kill the bot) is closed as of 2026-09-24: the
+  Scheduled Task `GridBot` runs `start_hidden.vbs` at logon -- no window,
+  no parent to close. The old shortcut is in `D:\_backups\`. Twin test
+  passed: `schtasks /run /tn GridBot` while the bot is up leaves exactly
+  one gridbot.py (the twin exits on the instance lock).
