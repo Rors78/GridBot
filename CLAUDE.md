@@ -37,13 +37,24 @@ deploys standard spot grids on the scanner's qualified picks, fills them from
 Kraken's **public** trade stream (trade-through, never touch), and keeps its
 books in JSON files in this folder.
 
-It **never sends an order**. The one private call is Kraken's read-only
-`TradeVolume` at startup, with a QUERY-ONLY key from the user environment
-(`GRIDBOT_KRAKEN_KEY` / `GRIDBOT_KRAKEN_SECRET`), to use the account's real fee
-tier. No key or any failure: defaults (0.22% maker / 0.38% taker) stand. Keys
-are never stored in this folder and never land in status.json (tested).
+It **never places an order**. Since 2026-09-24 it is a *validate-only
+live-readiness build* (Jeremy's direction: "as close to live key ready as
+you can get it"): `broker.py` mirrors every deploy and fill to Kraken's
+`AddOrder` with `validate=true`, which checks parameters and places nothing,
+and `add_order()` refuses `validate=False` outright. See **Live readiness**
+below. The private calls and their keys (user environment only, never stored
+in this folder, never in status.json -- tested):
 
-Non-goals: live trading, shorting, leverage, any API, any other bot.
+- `TradeVolume` at start, query key `GRIDBOT_KRAKEN_KEY` / `_SECRET`: the
+  account's real fee tier. No key or any failure: 0.22 / 0.38 defaults stand.
+- `Balance` + `OpenOrders` once at start (same query key): the `RECON`
+  journal row and `live.recon` in status.json. Informational in paper mode.
+- `AddOrder validate=true`, separate trade key `GRIDBOT_KRAKEN_TRADE_KEY` /
+  `_SECRET` (**Create & Modify Orders permission only -- no cancel yet, no
+  withdraw, IP-restricted**). No trade key: the mirror is off and says so.
+
+Non-goals: shorting, leverage, any API served, any other bot. Live trading
+is a non-goal **until the go-live gate below is passed and Jeremy signs off**.
 
 ## Quick start
 
@@ -75,6 +86,7 @@ first, python second. It matches on `D:\GridBot` paths, never on "python".
 |---|---|
 | `gridbot.py` | Everything at runtime. `Grid` (pure engine, no I/O), `TradeFeed` (Kraken public WS + REST catch-up), `Scanner` (oracle.py child: start, hang detection, log rotation, kill-orphan), `Bot` (state, journal, status, guard, deploy/exit decisions). |
 | `oracle.py` | GridPick Oracle v3.1 scanner. **Read-only: do not modify.** The bot imports `oracle.make_levels` and `oracle.PairBook` so it trades exactly the ladder the scanner replayed. |
+| `broker.py` | Kraken order-path plumbing, **validate-only build**. `KrakenBroker` (signed private calls: Balance, OpenOrders, AddOrder `validate=true` -- refuses anything else), `PairRules` (tick/lot rounding, ordermin/costmin), `OrderValidator` (background mirror worker), `grid_userref` (int32 scoping every would-be order to its grid). Deliberately **no cancel path**: the account trades manually too. |
 | `test_gridbot.py` | Self-contained test runner (`check()` PASS/FAIL, exits 1 on any failure). Fakes every Kraken call. |
 | `tui/lattice.py` | The GRIDPICK LATTICE console (Rich Live). Read-only: reads status.json, scan.json, journal.jsonl, gridbot.log and scanner.log via `tui/feeds.py`. Never imports gridbot, never calls Kraken. Header = bot/feed/scanner liveness, capital, book, guard. Cards = one per grid with its resting ladder (B/S/○/◆). Oracle = every scan metric. Bottom = RISK, P/L, TAPE, LOG. Keys: enter detail, l log, t tape, ? help. Layouts at 176+/140/110/90 columns. |
 | `tui/feeds.py`, `glyphs.py`, `theme.py`, `sixelimg.py`, `assets/` | TUI data feeds (StatusFeed, OracleFeed, JournalFeed, LogFeed, ScannerLogFeed), glyph map, theme, logo rendering. Feeds pick values out; they never compute a trading quantity. |
@@ -102,7 +114,9 @@ Runtime files (all gitignored, all written atomically tmp + os.replace):
 (account tier, else 0.22 / 0.38), `--exit-after` (300 s outside band; 0 =
 hold), `--cooldown` (60 min), `--max-day-loss-pct` (6), `--max-drawdown-pct`
 (12), `--scan-refresh` (120), `--scan-pace` (0.5), `--scan-arg` (repeatable,
-passed to oracle.py), `--no-scanner`, `--data-dir`, `--status`.
+passed to oracle.py), `--no-scanner`, `--no-live-validate` (turn off the
+AddOrder validate mirror; it is on automatically when the trade key is set),
+`--data-dir`, `--status`.
 
 ## Testing
 
@@ -116,9 +130,41 @@ Runtime verification is the files: after a change, watch `status.json` tick,
 `journal.jsonl` gain rows, and `gridbot.log` say what happened. A file
 existing is not done; observable output in status.json is done.
 
+## Live readiness (state as of 2026-09-24)
+
+The staged path to live, authorised by Jeremy on 2026-09-24. Done so far:
+
+- **Validate mirror**: deploys (taker buy + every resting rung) and fills are
+  re-sent as `AddOrder validate=true` and journalled as `VALIDATE` rows. A
+  pass proves pair/precision/minimums/shape only -- **not** funds, and not
+  that a post-only order would have rested (a fill's mirror was just crossed,
+  so its live post-only twin would often reject). Never read a VALIDATE pass
+  as "the exchange would have accepted this order".
+- **Recon at start**: `RECON` row + `live.recon` in status.json (balances,
+  USD, open orders). A LIVE start must instead compare the exchange's
+  userref-tagged orders against state.json and refuse to run on mismatch;
+  that code does not exist yet.
+- **Graceful stop on window close** (scar below) and order minimums verified:
+  at $500 / 3 grids / 8 levels the ~$20.80 rung clears every current pick's
+  `ordermin`/`costmin` (checked 2026-09-24: JUP $7.03, TIA $7.24, TRUMP $4.16).
+
+Still to build before arming, besides the gate: exchange-side reconciliation
+that blocks a live start, live fill tracking (OwnTrades WS, partial fills),
+post-only reject handling, userref-scoped cancel on stop/halt, kill switch.
+
+**Go-live gate -- all of it, measured, before `validate=False` is ever
+written:** 30+ round trips across 5+ fresh deploys over 14+ days;
+`realised_yield_day` within 2x of the scanner's prediction on those grids;
+zero guard halts; `catch_up_gaps` 0 across restarts and at least one reboot;
+zero VALIDATE failures over 7 days; recon-blocking start implemented and
+tested; and Jeremy's explicit written go in this repo's history. The arming
+change itself: its own branch, reviewed, never a flag default.
+
 ## Standing rules
 
-- **Paper only. No order path exists and none is to be added.**
+- **Paper only until the go-live gate is passed. `broker.py` refuses
+  `validate=False`; that refusal is load-bearing and is not to be relaxed,
+  worked around, or made configurable.**
 - **No fake stats.** The scanner's `yield_day` is a replay count, not a
   forecast: the 2026-09-23 audit measured it at roughly 9.75x too many fills
   and a Spearman of about -0.10 against outcomes. Never quote it as expected
@@ -172,3 +218,15 @@ existing is not done; observable output in status.json is done.
   batch file by byte offset as it goes; an edit shifts the offsets under the
   running copy and it does something else (a 3 s wait for it to end on its
   own timed out during the 2026-09-24 repro). Stop, edit, relaunch.
+- **A closed window or a reboot used to kill the bot mid-book: STARTs with
+  no STOP row** (journal audit 2026-09-24, twice in one evening). Fix: a
+  `SetConsoleCtrlHandler` in `_install_console_close_handler` catches
+  CTRL_CLOSE and holds Windows' ~5 s grace until the final save and STOP row
+  are on disk. Verified empirically by closing a live window. LOGOFF and
+  SHUTDOWN are only reliably delivered to services, so a reboot may still be
+  a hard kill: live mode must trust startup reconciliation, not this handler.
+  The remaining hole is the boot path -- the Startup shortcut's Git Bash tab
+  is the bot's parent, so closing that tab kills it. The replacement
+  (Scheduled Task `GridBot` -> `start_hidden.vbs`, no window, no parent to
+  close) needs a command Claude's harness will not run; see the 2026-09-24
+  session report.

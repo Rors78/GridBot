@@ -9,10 +9,18 @@ grids on the scanner's qualified picks, fills them from Kraken's public trade
 stream, and keeps state.json, journal.jsonl, status.json and gridbot.log in
 this folder.
 
-PAPER ONLY. No order is ever sent. The one private call is Kraken's read-only
-TradeVolume, made at start with a QUERY-ONLY key (user environment variables
-GRIDBOT_KRAKEN_KEY / GRIDBOT_KRAKEN_SECRET, never stored in this folder) to
-use the account's real fee tier. No key, or any failure: the defaults stand.
+PAPER ONLY. No order is ever placed. The private calls, all read-only in
+effect and all with keys from the user environment (never stored in this
+folder):
+  * TradeVolume at start (query key GRIDBOT_KRAKEN_KEY/_SECRET) for the
+    account's real fee tier. No key, or any failure: the defaults stand.
+  * Balance + OpenOrders once at start (same query key): the RECON journal
+    row, informational in paper mode.
+  * AddOrder with validate=true (separate trade key GRIDBOT_KRAKEN_TRADE_KEY/
+    _SECRET, create-order permission only), mirroring deploys and fills so
+    the live order path is exercised without ever resting an order. broker.py
+    refuses validate=False outright; there is no code that can place, amend
+    or cancel a real order. --no-live-validate turns the mirror off.
 
 THE GRID -- a standard spot grid, which is what the scanner's simulate_grid
 models (inventory counted from a neutral start: sells above, buys below).
@@ -63,6 +71,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import oracle  # noqa: E402  -- the user's v3.1 scanner, unchanged
+import broker  # noqa: E402  -- Kraken order-path plumbing, VALIDATE-ONLY build
 
 VERSION = "1.0"
 BUY, SELL = "BUY", "SELL"
@@ -1036,6 +1045,10 @@ class Bot:
         self.unrestored: dict = {}      # saved grids this code cannot run; slot held
         self._stopping = False
         self._stop_requested = False    # Ctrl+C: finish nothing new, then stop
+        # Set once run()'s finally has written the final save and the STOP
+        # row. The console-close handler holds Windows off until this fires.
+        self._finished = threading.Event()
+        self._console_ctrl = None       # keepalive: a GC'd ctypes callback crashes
         # Book guard (audit 2026-09-23): the whole book, not one grid, can stop
         # taking new grids. peak = highest book equity seen; day/day_start =
         # local date and book equity at its first look. Persisted in state.
@@ -1043,6 +1056,16 @@ class Bot:
         self.halt_reason: str | None = None
         # A graceful stop from outside (gridbot_stop.ps1): same path as Ctrl+C.
         self.stop_path = self.data / "stop.request"
+        # Live readiness (all read-only against the exchange): the validator
+        # mirrors paper orders to AddOrder validate=true when a trade key is
+        # set; recon is the startup Balance/OpenOrders snapshot. Neither can
+        # place, amend or cancel anything -- see broker.py's NOT_ARMED.
+        self.validator: broker.OrderValidator | None = None
+        self.live_note = "off"
+        self.recon: dict | None = None
+        # journal() is called from the main loop, the validator thread and
+        # the recon thread; one lock keeps the jsonl lines whole.
+        self._journal_lock = threading.Lock()
 
     def request_resync(self) -> None:
         """Ask for a catch-up. At most one worker runs; connects that arrive
@@ -1090,7 +1113,74 @@ class Bot:
     def journal(self, event: str, **fields) -> None:
         # ts and event last: a caller's field of the same name cannot overwrite
         # them. Exchange times travel as exch_ts.
-        append_jsonl(self.journal_path, {**fields, "ts": iso(self.clock()), "event": event})
+        with self._journal_lock:
+            append_jsonl(self.journal_path, {**fields, "ts": iso(self.clock()), "event": event})
+
+    # ---------------------------------------------------------------- live --
+    def reconcile_async(self, b: "broker.KrakenBroker") -> None:
+        """Startup snapshot of the real account: balance count, USD, open
+        orders. Journalled as RECON and served in status.json. Informational
+        in paper mode -- the account trades manually too, so a mismatch with
+        state.json means nothing here. A LIVE start must instead compare
+        against its own userref-tagged orders and refuse to run on mismatch;
+        that comparison does not exist yet and is part of the go-live gate."""
+        def work():
+            out: dict = {}
+            try:
+                bal = b.balance()
+                out["balances"] = len(bal)
+                out["usd"] = round(bal.get("ZUSD", bal.get("USD", 0.0)), 2)
+            except Exception as e:
+                out["balance_error"] = f"{type(e).__name__}: {str(e)[:120]}"
+            try:
+                out["open_orders"] = len(b.open_orders())
+            except Exception as e:
+                out["orders_error"] = f"{type(e).__name__}: {str(e)[:120]}"
+            out["note"] = "informational in paper mode"
+            self.journal("RECON", **out)
+            self.recon = {**out, "at": iso(self.clock())}   # after the row: recon set means journalled
+            if "balance_error" not in out and "orders_error" not in out:
+                self.event(f"recon: {out['balances']} balances, ${out['usd']:.2f} USD, "
+                           f"{out['open_orders']} open order(s) on the account")
+            else:
+                self.event("recon: " + (out.get("balance_error") or out.get("orders_error")),
+                           logging.WARNING)
+        threading.Thread(target=work, name="recon", daemon=True).start()
+
+    def _pair_rules(self, key: str) -> broker.PairRules:
+        return broker.PairRules(self.book.meta.get(key) if self.book is not None else None)
+
+    def _validate_order(self, tag: str, g: Grid, side: str, qty: float,
+                        price: float | None, ordertype: str = "limit") -> None:
+        """Round one would-be live order with the pair's rules and hand it to
+        the validator. A local minimums failure is journalled without a
+        network call: Kraken would refuse it, no need to ask."""
+        if self.validator is None:
+            return
+        rules = self._pair_rules(g.key)
+        ref = broker.grid_userref(g.symbol, g.deployed_at)
+        vol = rules.volume_str(qty)
+        px = rules.price_str(price) if price is not None else None
+        why = rules.check(float(px) if px else (g.last_px or 0.0), float(vol))
+        if why:
+            self.journal("VALIDATE", tag=tag, symbol=g.symbol, pair=g.key,
+                         side=side.lower(), ordertype=ordertype, volume=vol,
+                         price=px, userref=ref, ok=False, error=f"local: {why}")
+            return
+        self.validator.submit(tag, g.symbol, g.key, side.lower(), vol,
+                              price=px, ordertype=ordertype, userref=ref)
+
+    def _validate_deploy(self, g: Grid) -> None:
+        """Mirror a live deploy: the taker market buy for the sells' coins
+        first (the one order a live deploy sends before anything rests),
+        then every resting rung."""
+        if self.validator is None:
+            return
+        if g.base > 0:
+            self._validate_order("deploy-buy", g, "buy", g.base, None, ordertype="market")
+        for j, o in enumerate(g.orders):
+            if o:
+                self._validate_order("deploy-rung", g, o["side"], o["qty"], g.levels[j])
 
     # --------------------------------------------------------------- persist --
     @staticmethod
@@ -1414,6 +1504,10 @@ class Bot:
             self.journal("FILL", symbol=g.symbol, **row)
             pnl = f" {f['pnl']:+.4f}" if "pnl" in f else ""
             self.event(f"{g.symbol} {f['side']} L{f['level']} @ {oracle.fmt_px(f['price'])}{pnl}")
+            # Live mirror: the order this fill consumed is the one a live
+            # grid would have had resting; validate its parameters. (A pass
+            # is a parameter check only -- see broker.py's module docstring.)
+            self._validate_order("fill", g, f["side"], f["qty"], f["price"])
         if rt_before == 0 and g.round_trips > 0 and g.first_rt_at is not None:
             # Once per grid: how long the capital sat before its first earning.
             since = g.first_rt_at - (g.deployed_at or g.first_rt_at)
@@ -1768,6 +1862,7 @@ class Bot:
                      taker_pct=self.args.taker, **info, scanner=meta_g)
         self.event(f"DEPLOY {sym} {g.kind} {g.n} lvls {oracle.fmt_px(g.lo)}-{oracle.fmt_px(g.hi)} "
                    f"@ {oracle.fmt_px(px)} (${g.alloc:.0f}, scanner {r.get('yield_day', 0):.2f}%/d)")
+        self._validate_deploy(g)
         self.save_state()
         return None
 
@@ -1958,6 +2053,12 @@ class Bot:
                          "held": sum(self._held_alloc(d) for d in self.unrestored.values())},
                 "closed": dict(self.totals),
                 "total_pnl": closed_pnl + tot["realised"] + tot["unrealised"],
+                # Live readiness, all read-only: what the validate mirror and
+                # the startup account recon saw. mode stays "paper" -- nothing
+                # in this build can place an order (broker.py NOT_ARMED).
+                "live": {"order_path": self.live_note,
+                         "validate": dict(self.validator.stats) if self.validator else None,
+                         "recon": self.recon},
                 "grids": rows,
                 "feed": {"connected": bool(getattr(self.feed, "connected", False)),
                          "last_msg_age_s": (now - self.feed.last_msg) if getattr(self.feed, "last_msg", 0) else None,
@@ -2103,7 +2204,38 @@ class Bot:
                     prev[sig] = signal.signal(sig, request)
                 except (ValueError, OSError):
                     pass
+        self._install_console_close_handler()
         return prev
+
+    def _install_console_close_handler(self):
+        """Console close (and, best effort, logoff/shutdown) on Windows.
+
+        A closed window or a reboot used to kill the process outright: no
+        final save, no STOP row (journal audit 2026-09-24 found STARTs with
+        no STOP). CTRL_CLOSE_EVENT gives a handler roughly five seconds, so
+        the handler requests the stop and then HOLDS the delivery thread
+        until run()'s finally has saved state and journalled STOP --
+        returning sooner lets Windows kill the process mid-save. LOGOFF and
+        SHUTDOWN are delivered reliably only to services, so a reboot may
+        still land as a hard kill; live mode must rely on exchange-side
+        reconciliation at the next start, never on this handler."""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            @ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
+            def handler(event):
+                if event in (2, 5, 6):     # CTRL_CLOSE, CTRL_LOGOFF, CTRL_SHUTDOWN
+                    self._stop_requested = True
+                    self._finished.wait(20.0)
+                    return True
+                return False               # Ctrl+C / Ctrl+Break: the signal handlers
+            if ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True):
+                self._console_ctrl = handler
+        except Exception:
+            pass                           # no console (pythonw): nothing to close
 
     def run(self) -> int:
         import signal
@@ -2184,6 +2316,11 @@ class Bot:
             if self._state_loaded:
                 self.save_state()
                 self.journal("STOP", grids=sorted(self.grids))
+            # Release the console-close handler BEFORE the slower teardown:
+            # the books are safe on disk, and Windows only granted ~5 s.
+            self._finished.set()
+            if self.validator is not None:
+                self.validator.stop()
             if self.scanner is not None:
                 self.scanner.stop()
             for sig, h in prev_handlers.items():
@@ -2191,6 +2328,7 @@ class Bot:
                     signal.signal(sig, h)
                 except (ValueError, OSError, TypeError):
                     pass
+            self._finished.set()           # idempotent; covers the not-loaded path
 
 
 # =============================================================================
@@ -2219,6 +2357,10 @@ def parse_args(argv=None):
     p.add_argument("--scan-pace", type=float, default=0.5, help="scanner --pace seconds between REST calls")
     p.add_argument("--scan-arg", action="append", help="extra argument passed to oracle.py (repeatable)")
     p.add_argument("--no-scanner", action="store_true", help="do not start oracle.py; read scan.json only")
+    p.add_argument("--no-live-validate", action="store_true",
+                   help="do not mirror orders to Kraken AddOrder validate=true "
+                        "(the mirror is on automatically when GRIDBOT_KRAKEN_TRADE_KEY is set; "
+                        "it never places an order either way)")
     p.add_argument("--data-dir", default=str(HERE), help="where state, journal, status and logs live")
     p.add_argument("--status", action="store_true", help="print status.json and exit")
     a = p.parse_args(argv)
@@ -2359,6 +2501,23 @@ def main(argv=None) -> int:
     log.info(fee_note)
     scanner = None if args.no_scanner else Scanner(data, data / "scan.json", args)
     bot = Bot(args, scanner=scanner, book=book)
+    # Live-readiness mirrors, both incapable of placing an order:
+    #  - validator: paper orders re-sent as AddOrder validate=true, needs the
+    #    separate TRADE key (create-order permission only, no withdraw);
+    #  - recon: one Balance/OpenOrders snapshot with the query key.
+    tcreds = broker.trade_creds()
+    if args.no_live_validate:
+        bot.live_note = "off (--no-live-validate)"
+    elif not tcreds:
+        bot.live_note = "off (no GRIDBOT_KRAKEN_TRADE_KEY)"
+    else:
+        bot.validator = broker.OrderValidator(broker.KrakenBroker(*tcreds),
+                                              bot.journal, bot.event)
+        bot.live_note = "validate (AddOrder validate=true: parameter checks, places nothing)"
+    log.info("live order path: %s", bot.live_note)
+    qcreds = kraken_query_creds()
+    if qcreds:
+        bot.reconcile_async(broker.KrakenBroker(*qcreds))
     if from_stale_cache:
         bot.book_loaded_at = time.time() - 5 * 3600     # try a live reload in an hour
     log.info("GridBot %s starting: capital %.2f, max grids %d, fee %.2f/%.2f",

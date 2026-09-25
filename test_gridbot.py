@@ -1273,5 +1273,171 @@ check("status.json shows the fees in use and their source",
       and "Kraken tier" in st37["fees"]["source"], st37["fees"])
 check("the key never lands in status.json", "k" * 56 not in (tmp18 / "status.json").read_text())
 
+# -----------------------------------------------------------------------------
+print("\n25. live readiness: the broker is validate-only and can place nothing")
+import base64  # noqa: E402
+import broker  # noqa: E402
+
+rules = broker.PairRules({"pair_decimals": 3, "lot_decimals": 2, "ordermin": "1",
+                          "costmin": "0.5", "tick_size": "0.005"})
+check("prices snap to the pair's tick and carry its decimals",
+      rules.price_str(2.0812) == "2.080" and rules.price_str(2.0839) == "2.085",
+      (rules.price_str(2.0812), rules.price_str(2.0839)))
+check("volumes floor to lot_decimals, never up", rules.volume_str(1.239) == "1.23")
+check("flooring can push a rung under ordermin, and check() catches it after",
+      rules.check(2.0, 1.0) is None and "minimum order" in (rules.check(2.0, 0.99) or ""))
+check("costmin is checked on the rounded numbers",
+      "minimum" in (rules.check(0.2, 1.0) or ""), rules.check(0.2, 1.0))
+r_def = broker.PairRules(None)
+check("no pair metadata: 8-decimal defaults, nothing rejected",
+      r_def.price_str(1.5) == "1.50000000" and r_def.check(1.5, 0.001) is None)
+u1, u2 = broker.grid_userref("AAA/USD", 1790000000.7), broker.grid_userref("AAA/USD", 1790000000.9)
+check("grid_userref is a deterministic positive int32 (whole-second resolution)",
+      u1 == u2 and 0 < u1 <= 0x7FFFFFFF and u1 != broker.grid_userref("BBB/USD", 1790000000.7))
+
+sent = []
+def fake_transport(path, data, headers):
+    sent.append((path, dict(data), dict(headers)))
+    return {"error": [], "result": {"descr": {"order": "validated"}}}
+
+kb = broker.KrakenBroker("key", base64.b64encode(b"secret").decode(),
+                         transport=fake_transport, min_interval=0.0)
+res = kb.add_order("AAAUSD", "BUY", "1.23", price="2.080", userref=u1)
+p, d, h = sent[-1]
+check("AddOrder always carries validate=true, post-only, the userref and a signature",
+      p == "/0/private/AddOrder" and d["validate"] == "true" and d["oflags"] == "post"
+      and d["type"] == "buy" and d["userref"] == str(u1) and h.get("API-Sign"), d)
+kb.add_order("AAAUSD", "sell", "1.00", price="2.085")
+check("nonces are strictly increasing", int(sent[-1][1]["nonce"]) > int(sent[-2][1]["nonce"]))
+kb.add_order("AAAUSD", "buy", "3.00", ordertype="market")
+check("a market order sends no price and no post flag",
+      "price" not in sent[-1][1] and "oflags" not in sent[-1][1], sent[-1][1])
+try:
+    kb.add_order("AAAUSD", "buy", "1.0", price="2.0", validate=False)
+    check("validate=False is refused outright", False)
+except RuntimeError as e:
+    check("validate=False is refused outright", "refusing" in str(e))
+try:
+    kb.add_order("AAAUSD", "hold", "1.0", price="2.0")
+    check("an unknown side is refused", False)
+except ValueError:
+    check("an unknown side is refused", True)
+check("no cancel path exists anywhere in the broker",
+      not any("cancel" in n.lower() for n in dir(broker.KrakenBroker)))
+
+def err_transport(path, data, headers):
+    return {"error": ["EOrder:Invalid price"]}
+kb_err = broker.KrakenBroker("k", base64.b64encode(b"s").decode(),
+                             transport=err_transport, min_interval=0.0)
+try:
+    kb_err.add_order("AAAUSD", "buy", "1.0", price="2.0")
+    check("a Kraken error list raises BrokerError", False)
+except broker.BrokerError as e:
+    check("a Kraken error list raises BrokerError", "Invalid price" in str(e))
+
+def bal_transport(path, data, headers):
+    if path.endswith("Balance"):
+        return {"error": [], "result": {"ZUSD": "120.5000", "XXBT": "0.0000", "JUP": "195.4"}}
+    return {"error": [], "result": {"open": {"OA": {}, "OB": {}}}}
+kb_bal = broker.KrakenBroker("k", base64.b64encode(b"s").decode(),
+                             transport=bal_transport, min_interval=0.0)
+check("balance() parses and drops zero assets", kb_bal.balance() == {"ZUSD": 120.5, "JUP": 195.4})
+check("open_orders() returns the open map", len(kb_bal.open_orders()) == 2)
+
+# the validator worker: journals every answer, throttles repeat failure events
+v_rows, v_events = [], []
+class OkBroker:
+    def add_order(self, *a, **k):
+        return {"descr": {"order": "buy 1.23 AAAUSD @ limit 2.080"}}
+ov = broker.OrderValidator(OkBroker(), lambda ev, **f: v_rows.append({"event": ev, **f}),
+                           lambda m, *a: v_events.append(m))
+ov.submit("deploy-rung", "AAA/USD", "AAAUSD", "buy", "1.23", price="2.080", userref=u1)
+ov.submit("fill", "AAA/USD", "AAAUSD", "sell", "1.23", price="2.085", userref=u1)
+for _ in range(100):
+    if ov.stats["sent"] == 2 and len(v_rows) == 2:
+        break
+    time.sleep(0.02)
+ov.stop()
+check("the validator journals a VALIDATE row per order, with the answer",
+      len(v_rows) == 2 and all(r["event"] == "VALIDATE" and r["ok"] for r in v_rows)
+      and v_rows[0]["descr"].startswith("buy"), v_rows)
+check("validator stats count ok answers", ov.stats["ok"] == 2 and ov.stats["fail"] == 0)
+
+class BoomBroker:
+    def add_order(self, *a, **k):
+        raise broker.BrokerError("EAPI:Invalid key")
+v_rows2, v_events2 = [], []
+ov2 = broker.OrderValidator(BoomBroker(), lambda ev, **f: v_rows2.append(f),
+                            lambda m, *a: v_events2.append(m))
+ov2.submit("fill", "AAA/USD", "AAAUSD", "buy", "1.0", price="2.0")
+ov2.submit("fill", "AAA/USD", "AAAUSD", "buy", "1.0", price="2.0")
+for _ in range(100):
+    if len(v_rows2) == 2:
+        break
+    time.sleep(0.02)
+ov2.stop()
+check("failures are journalled with the error and counted",
+      len(v_rows2) == 2 and not v_rows2[0]["ok"] and "Invalid key" in v_rows2[0]["error"]
+      and ov2.stats["fail"] == 2, v_rows2)
+check("the same failure only makes one console event", len(v_events2) == 1, v_events2)
+
+# the bot wiring: deploy and fills are mirrored; recon lands in journal + status
+class SpyValidator:
+    def __init__(self):
+        self.calls = []
+        self.stats = {"sent": 0, "ok": 0, "fail": 0, "dropped": 0}
+    def submit(self, tag, symbol, pair, side, volume, price=None, ordertype="limit", userref=None):
+        self.calls.append({"tag": tag, "pair": pair, "side": side, "volume": volume,
+                           "price": price, "ordertype": ordertype, "userref": userref})
+    def stop(self):
+        pass
+
+tmp_lv = Path(tempfile.mkdtemp(prefix="gridbot_test_"))
+b_lv = make_bot(tmp_lv, max_grids="1")
+b_lv.validator = SpyValidator()
+b_lv.live_note = "validate (test)"
+write_scan(tmp_lv, [scan_row("AAA/USD", 100, 110)])
+b_lv.skipped_gen = None
+b_lv.consider()
+g_lv = b_lv.grids["AAA/USD"]
+dep = [c for c in b_lv.validator.calls if c["tag"] == "deploy-buy"]
+rungs = [c for c in b_lv.validator.calls if c["tag"] == "deploy-rung"]
+check("a deploy mirrors the taker buy (market, no price) plus every resting rung",
+      len(dep) == 1 and dep[0]["ordertype"] == "market" and dep[0]["price"] is None
+      and len(rungs) == sum(1 for o in g_lv.orders if o), (len(dep), len(rungs)))
+check("every mirrored order carries the grid's userref",
+      {c["userref"] for c in b_lv.validator.calls} == {broker.grid_userref("AAA/USD", g_lv.deployed_at)})
+n_before = len(b_lv.validator.calls)
+b_lv.on_trade("AAA/USD", 103.99, g_lv.deployed_at + 10, 1)
+fills_v = b_lv.validator.calls[n_before:]
+check("a fill mirrors the order the market just consumed",
+      len(fills_v) == 1 and fills_v[0]["tag"] == "fill" and fills_v[0]["side"] == "buy"
+      and float(fills_v[0]["price"]) == 104.0, fills_v)
+check("mirrored volumes are strings rounded by the pair's rules",
+      isinstance(fills_v[0]["volume"], str) and float(fills_v[0]["volume"]) <= g_lv.rung / 104.0)
+snap_lv = b_lv.snapshot()
+check("status.json serves the live block and mode stays paper",
+      snap_lv["mode"] == "paper" and snap_lv["live"]["order_path"] == "validate (test)"
+      and isinstance(snap_lv["live"]["validate"], dict), snap_lv["live"])
+b_lv._validate_order("fill", g_lv, "SELL", 0.05, 104.0)     # under ordermin 0.1
+loc = [json.loads(x) for x in (tmp_lv / "journal.jsonl").read_text().splitlines()
+       if '"VALIDATE"' in x]
+check("an order under Kraken's minimums is journalled locally, no network call",
+      len(loc) == 1 and not loc[0]["ok"] and loc[0]["error"].startswith("local:"), loc)
+
+b_lv.reconcile_async(kb_bal)
+for _ in range(100):
+    if b_lv.recon is not None:
+        break
+    time.sleep(0.02)
+rec_rows = [json.loads(x) for x in (tmp_lv / "journal.jsonl").read_text().splitlines()
+            if x.strip().endswith('"event": "RECON"}')]
+check("recon journals one RECON row with balances, USD and open orders",
+      len(rec_rows) == 1 and rec_rows[0]["balances"] == 2 and rec_rows[0]["usd"] == 120.5
+      and rec_rows[0]["open_orders"] == 2, rec_rows)
+check("recon is served in status.json", b_lv.snapshot()["live"]["recon"]["usd"] == 120.5)
+check("a bot with no trade key serves order_path off",
+      make_bot(Path(tempfile.mkdtemp(prefix="gridbot_test_"))).snapshot()["live"]["order_path"] == "off")
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
