@@ -1,0 +1,785 @@
+{
+ "rows": [
+  {
+   "symbol": "WLDUSDT",
+   "quote_vol_24h": 24740,
+   "trades_24h": 147,
+   "spread_med_pct": 0.349,
+   "spread_samples": 3,
+   "active_1m_pct": 4.5,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "TRUMPUSD",
+   "quote_vol_24h": 5577,
+   "trades_24h": 105,
+   "spread_med_pct": 0.5623,
+   "spread_samples": 3,
+   "active_1m_pct": 1.0,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "TRUMPUSDT",
+   "quote_vol_24h": 13015,
+   "trades_24h": 166,
+   "spread_med_pct": 0.9852,
+   "spread_samples": 3,
+   "active_1m_pct": 2.2,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "ARBUSDT",
+   "quote_vol_24h": 7483,
+   "trades_24h": 90,
+   "spread_med_pct": 0.4936,
+   "spread_samples": 3,
+   "active_1m_pct": 3.7,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "DOTUSD",
+   "quote_vol_24h": 11465,
+   "trades_24h": 47,
+   "spread_med_pct": 0.4021,
+   "spread_samples": 3,
+   "active_1m_pct": 1.5,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "DOTUSDT",
+   "quote_vol_24h": 19277,
+   "trades_24h": 121,
+   "spread_med_pct": 0.242,
+   "spread_samples": 3,
+   "active_1m_pct": 4.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "FILUSDT",
+   "quote_vol_24h": 10279,
+   "trades_24h": 110,
+   "spread_med_pct": 0.8026,
+   "spread_samples": 3,
+   "active_1m_pct": 4.4,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "INJUSDT",
+   "quote_vol_24h": 14998,
+   "trades_24h": 56,
+   "spread_med_pct": 0.4365,
+   "spread_samples": 3,
+   "active_1m_pct": 2.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "ENAUSDT",
+   "quote_vol_24h": 3069,
+   "trades_24h": 60,
+   "spread_med_pct": 0.8454,
+   "spread_samples": 3,
+   "active_1m_pct": 2.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "OPUSD",
+   "quote_vol_24h": 58,
+   "trades_24h": 1,
+   "spread_med_pct": 2.7778,
+   "spread_samples": 3,
+   "active_1m_pct": 0.1,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "OPUSDT",
+   "quote_vol_24h": 467,
+   "trades_24h": 20,
+   "spread_med_pct": 1.3986,
+   "spread_samples": 3,
+   "active_1m_pct": 1.0,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "NEARUSD",
+   "quote_vol_24h": 41816,
+   "trades_24h": 274,
+   "spread_med_pct": 0.4016,
+   "spread_samples": 3,
+   "active_1m_pct": 4.9,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "NEARUSDT",
+   "quote_vol_24h": 246064,
+   "trades_24h": 967,
+   "spread_med_pct": 0.4594,
+   "spread_samples": 3,
+   "active_1m_pct": 22.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "JUPUSD",
+   "quote_vol_24h": 5016,
+   "trades_24h": 46,
+   "spread_med_pct": 0.9143,
+   "spread_samples": 3,
+   "active_1m_pct": 0.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "JUPUSDT",
+   "quote_vol_24h": 7021,
+   "trades_24h": 54,
+   "spread_med_pct": 0.6499,
+   "spread_samples": 3,
+   "active_1m_pct": 1.0,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "AVAXUSD",
+   "quote_vol_24h": 110016,
+   "trades_24h": 832,
+   "spread_med_pct": 0.0911,
+   "spread_samples": 3,
+   "active_1m_pct": 30.5,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "AVAXUSDT",
+   "quote_vol_24h": 59734,
+   "trades_24h": 517,
+   "spread_med_pct": 0.0546,
+   "spread_samples": 3,
+   "active_1m_pct": 16.2,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "RENDERUSD",
+   "quote_vol_24h": 32327,
+   "trades_24h": 109,
+   "spread_med_pct": 0.8339,
+   "spread_samples": 3,
+   "active_1m_pct": 1.7,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "RENDERUSDT",
+   "quote_vol_24h": 11995,
+   "trades_24h": 125,
+   "spread_med_pct": 1.5133,
+   "spread_samples": 3,
+   "active_1m_pct": 3.8,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "ADAUSD",
+   "quote_vol_24h": 77210,
+   "trades_24h": 427,
+   "spread_med_pct": 0.0586,
+   "spread_samples": 3,
+   "active_1m_pct": 18.3,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "ADAUSDT",
+   "quote_vol_24h": 65504,
+   "trades_24h": 653,
+   "spread_med_pct": 0.0664,
+   "spread_samples": 3,
+   "active_1m_pct": 14.9,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "BONKUSD",
+   "quote_vol_24h": 47808,
+   "trades_24h": 49,
+   "spread_med_pct": 0.5348,
+   "spread_samples": 3,
+   "active_1m_pct": 2.4,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "BONKUSDT",
+   "quote_vol_24h": 111,
+   "trades_24h": 9,
+   "spread_med_pct": 0.8032,
+   "spread_samples": 3,
+   "active_1m_pct": 0.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "SUIUSD",
+   "quote_vol_24h": 164525,
+   "trades_24h": 756,
+   "spread_med_pct": 0.0559,
+   "spread_samples": 3,
+   "active_1m_pct": 23.9,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "SUIUSDT",
+   "quote_vol_24h": 579530,
+   "trades_24h": 1654,
+   "spread_med_pct": 0.0878,
+   "spread_samples": 3,
+   "active_1m_pct": 34.2,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "LINKUSD",
+   "quote_vol_24h": 71918,
+   "trades_24h": 539,
+   "spread_med_pct": 0.0707,
+   "spread_samples": 3,
+   "active_1m_pct": 22.7,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "LINKUSDT",
+   "quote_vol_24h": 100210,
+   "trades_24h": 1115,
+   "spread_med_pct": 0.0707,
+   "spread_samples": 3,
+   "active_1m_pct": 30.1,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "DOGEUSD",
+   "quote_vol_24h": 108776,
+   "trades_24h": 381,
+   "spread_med_pct": 0.0511,
+   "spread_samples": 3,
+   "active_1m_pct": 15.4,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "DOGEUSDT",
+   "quote_vol_24h": 200620,
+   "trades_24h": 778,
+   "spread_med_pct": 0.0307,
+   "spread_samples": 3,
+   "active_1m_pct": 19.9,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "SEIUSDT",
+   "quote_vol_24h": 1077,
+   "trades_24h": 24,
+   "spread_med_pct": 0.8303,
+   "spread_samples": 3,
+   "active_1m_pct": 1.2,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "HBARUSD",
+   "quote_vol_24h": 208515,
+   "trades_24h": 213,
+   "spread_med_pct": 0.0744,
+   "spread_samples": 3,
+   "active_1m_pct": 8.8,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "HBARUSDT",
+   "quote_vol_24h": 12474,
+   "trades_24h": 255,
+   "spread_med_pct": 0.0638,
+   "spread_samples": 3,
+   "active_1m_pct": 9.5,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "SOLUSD",
+   "quote_vol_24h": 265388,
+   "trades_24h": 1032,
+   "spread_med_pct": 0.0244,
+   "spread_samples": 3,
+   "active_1m_pct": 22.2,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "SOLUSDT",
+   "quote_vol_24h": 892219,
+   "trades_24h": 2745,
+   "spread_med_pct": 0.0081,
+   "spread_samples": 3,
+   "active_1m_pct": 43.0,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "PEPEUSD",
+   "quote_vol_24h": 247928,
+   "trades_24h": 193,
+   "spread_med_pct": 0.227,
+   "spread_samples": 3,
+   "active_1m_pct": 4.9,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "PEPEUSDT",
+   "quote_vol_24h": 25632,
+   "trades_24h": 125,
+   "spread_med_pct": 0.4535,
+   "spread_samples": 3,
+   "active_1m_pct": 3.3,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "XRPUSD",
+   "quote_vol_24h": 448960,
+   "trades_24h": 1146,
+   "spread_med_pct": 0.0131,
+   "spread_samples": 3,
+   "active_1m_pct": 26.0,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "XRPUSDT",
+   "quote_vol_24h": 757329,
+   "trades_24h": 2035,
+   "spread_med_pct": 0.0065,
+   "spread_samples": 3,
+   "active_1m_pct": 39.4,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "LTCUSD",
+   "quote_vol_24h": 7464,
+   "trades_24h": 72,
+   "spread_med_pct": 0.1968,
+   "spread_samples": 3,
+   "active_1m_pct": 2.8,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "LTCUSDT",
+   "quote_vol_24h": 191798,
+   "trades_24h": 1068,
+   "spread_med_pct": 0.0421,
+   "spread_samples": 3,
+   "active_1m_pct": 25.6,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "ETHUSD",
+   "quote_vol_24h": 454830,
+   "trades_24h": 1443,
+   "spread_med_pct": 0.0022,
+   "spread_samples": 3,
+   "active_1m_pct": 22.2,
+   "bars_returned": 1440
+  },
+  {
+   "symbol": "ETHUSDT",
+   "quote_vol_24h": 447331,
+   "trades_24h": 1896,
+   "spread_med_pct": 0.0015,
+   "spread_samples": 3,
+   "active_1m_pct": 35.2,
+   "bars_returned": 1440
+  }
+ ],
+ "missing": [],
+ "limits": [
+  [
+   "REQUEST_WEIGHT",
+   "MINUTE",
+   1,
+   6000
+  ],
+  [
+   "ORDERS",
+   "SECOND",
+   10,
+   100
+  ],
+  [
+   "ORDERS",
+   "DAY",
+   1,
+   200000
+  ],
+  [
+   "RAW_REQUESTS",
+   "MINUTE",
+   5,
+   300000
+  ]
+ ],
+ "quotes": {
+  "USDT": 202,
+  "BTC": 5,
+  "USDC": 4,
+  "USD": 54
+ },
+ "window": [
+  1790432160000,
+  1790518560000
+ ],
+ "weights": [
+  [
+   "ping",
+   "113"
+  ],
+  [
+   "exchangeInfo",
+   "133"
+  ],
+  [
+   "ticker/24hr",
+   "173"
+  ],
+  [
+   "ticker/bookTicker",
+   "177"
+  ],
+  [
+   "ticker/bookTicker",
+   "226"
+  ],
+  [
+   "ticker/bookTicker",
+   "56"
+  ],
+  [
+   "time",
+   "57"
+  ],
+  [
+   "klines",
+   "59"
+  ],
+  [
+   "klines",
+   "61"
+  ],
+  [
+   "klines",
+   "63"
+  ],
+  [
+   "klines",
+   "65"
+  ],
+  [
+   "klines",
+   "67"
+  ],
+  [
+   "klines",
+   "69"
+  ],
+  [
+   "klines",
+   "71"
+  ],
+  [
+   "klines",
+   "73"
+  ],
+  [
+   "klines",
+   "75"
+  ],
+  [
+   "klines",
+   "79"
+  ],
+  [
+   "klines",
+   "81"
+  ],
+  [
+   "klines",
+   "83"
+  ],
+  [
+   "klines",
+   "85"
+  ],
+  [
+   "klines",
+   "87"
+  ],
+  [
+   "klines",
+   "93"
+  ],
+  [
+   "klines",
+   "95"
+  ],
+  [
+   "klines",
+   "97"
+  ],
+  [
+   "klines",
+   "99"
+  ],
+  [
+   "klines",
+   "101"
+  ],
+  [
+   "klines",
+   "103"
+  ],
+  [
+   "klines",
+   "105"
+  ],
+  [
+   "klines",
+   "109"
+  ],
+  [
+   "klines",
+   "111"
+  ],
+  [
+   "klines",
+   "113"
+  ],
+  [
+   "klines",
+   "115"
+  ],
+  [
+   "klines",
+   "117"
+  ],
+  [
+   "klines",
+   "119"
+  ],
+  [
+   "klines",
+   "121"
+  ],
+  [
+   "klines",
+   "123"
+  ],
+  [
+   "klines",
+   "125"
+  ],
+  [
+   "klines",
+   "127"
+  ],
+  [
+   "klines",
+   "129"
+  ],
+  [
+   "klines",
+   "131"
+  ],
+  [
+   "klines",
+   "133"
+  ],
+  [
+   "klines",
+   "139"
+  ],
+  [
+   "klines",
+   "143"
+  ],
+  [
+   "klines",
+   "145"
+  ],
+  [
+   "klines",
+   "147"
+  ],
+  [
+   "klines",
+   "149"
+  ],
+  [
+   "klines",
+   "153"
+  ],
+  [
+   "klines",
+   "155"
+  ],
+  [
+   "klines",
+   "157"
+  ],
+  [
+   "klines",
+   "159"
+  ],
+  [
+   "klines",
+   "161"
+  ],
+  [
+   "klines",
+   "163"
+  ],
+  [
+   "klines",
+   "165"
+  ],
+  [
+   "klines",
+   "167"
+  ],
+  [
+   "klines",
+   "169"
+  ],
+  [
+   "klines",
+   "171"
+  ],
+  [
+   "klines",
+   "173"
+  ],
+  [
+   "klines",
+   "175"
+  ],
+  [
+   "klines",
+   "177"
+  ],
+  [
+   "klines",
+   "179"
+  ],
+  [
+   "klines",
+   "185"
+  ],
+  [
+   "klines",
+   "189"
+  ],
+  [
+   "klines",
+   "191"
+  ],
+  [
+   "klines",
+   "193"
+  ],
+  [
+   "klines",
+   "195"
+  ],
+  [
+   "klines",
+   "199"
+  ],
+  [
+   "klines",
+   "201"
+  ],
+  [
+   "klines",
+   "203"
+  ],
+  [
+   "klines",
+   "205"
+  ],
+  [
+   "klines",
+   "207"
+  ],
+  [
+   "klines",
+   "209"
+  ],
+  [
+   "klines",
+   "211"
+  ],
+  [
+   "klines",
+   "213"
+  ],
+  [
+   "klines",
+   "215"
+  ],
+  [
+   "klines",
+   "217"
+  ],
+  [
+   "klines",
+   "219"
+  ],
+  [
+   "klines",
+   "221"
+  ],
+  [
+   "klines",
+   "223"
+  ],
+  [
+   "klines",
+   "225"
+  ],
+  [
+   "klines",
+   "231"
+  ],
+  [
+   "klines",
+   "233"
+  ],
+  [
+   "klines",
+   "237"
+  ],
+  [
+   "klines",
+   "239"
+  ],
+  [
+   "klines",
+   "241"
+  ],
+  [
+   "klines",
+   "243"
+  ],
+  [
+   "klines",
+   "245"
+  ],
+  [
+   "klines",
+   "247"
+  ],
+  [
+   "klines",
+   "249"
+  ],
+  [
+   "klines",
+   "251"
+  ],
+  [
+   "klines",
+   "253"
+  ],
+  [
+   "klines",
+   "255"
+  ]
+ ]
+}
