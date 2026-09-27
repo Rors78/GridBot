@@ -210,12 +210,123 @@ def t_nearest_rank_and_pass_rule_fail_closed():
     return ok, (s["conditions"], few["conditions"], tail["tail_p10_down"])
 
 
+# ------------------------------------------------------------------ DECIDER tests
+def book_of(minutes, stamped=()):
+    """minutes: [(minute_open, bid, ask)] -> the loader's shape (mid = midpoint)."""
+    return {"rows": {m: (b, a, (a + b) / 2) for m, b, a in minutes}, "stamped": set(stamped),
+            "skipped_files": []}
+
+
+def bflat(t_from, count, bid, ask):
+    return [(t_from + i * 60, bid, ask) for i in range(count)]
+
+
+def bforward(minutes, stamped=(), horizon_min=20, deploy=(104.5, 104.6)):
+    with_test_pair(0.0)
+    bk = book_of([(T0 - 60, *deploy)] + minutes, stamped)
+    return R.book_forward(TEST, bk, T0, LEVELS, "arith", horizon_s=horizon_min * 60)
+
+
+def t_book_ask_at_or_below_level_fills_the_buy():
+    at = bforward([(T0, 103.9, 104.0)] + bflat(T0 + 60, 19, 104.5, 104.6))     # ask == 104 (BUY)
+    above = bforward([(T0, 103.9, 104.01)] + bflat(T0 + 60, 19, 104.5, 104.6))
+    return at["fills"] == 1 and above["fills"] == 0, (at["fills"], above["fills"])
+
+
+def t_book_bid_at_or_above_level_fills_the_sell():
+    # afterwards the book sits between the new BUY (105) and SELL (107): no second fill
+    at = bforward([(T0, 106.0, 106.1)] + bflat(T0 + 60, 19, 105.5, 105.6))     # bid == 106 (SELL)
+    below = bforward([(T0, 105.99, 106.1)] + bflat(T0 + 60, 19, 105.5, 105.6))
+    return at["fills"] == 1 and below["fills"] == 0, (at["fills"], below["fills"])
+
+
+def t_book_mid_or_print_crossing_never_fills():
+    # mid 103.6 is below the BUY at 104 but the ask (104.2) is not: no book cross
+    r = bforward([(T0, 103.0, 104.2)] + bflat(T0 + 60, 19, 104.5, 104.6))
+    return r["fills"] == 0, r
+
+
+def t_book_sides_never_cross_fill():
+    # ask above the SELL at 106 and bid below it: nothing crosses, nothing fills
+    r = bforward([(T0, 105.5, 106.5)] + bflat(T0 + 60, 19, 104.5, 104.6))
+    return r["fills"] == 0, r
+
+
+def t_book_one_minute_fills_every_crossed_level_at_its_price():
+    with_test_pair(0.0)
+    g = gridbot.Grid(TEST, TEST, LEVELS, "arith", R.ALLOC, R.MAKER_PCT, R.TAKER_PCT)
+    g.deploy(104.6, float(T0))
+    fills = R.apply_book_minute(g, 101.4, 101.5, float(T0 + 60))
+    return [f["price"] for f in fills] == [104.0, 103.0, 102.0] and all(f["side"] == "BUY" for f in fills), fills
+
+
+def t_book_gap_stamps_and_missing_rows_are_unmeasured():
+    mins = bflat(T0, 20, 104.5, 104.6)
+    del mins[5:8]                                   # minutes T0+300..T0+420 have no row
+    stamped = {T0 + 300, T0 + 360, T0 + 420,        # the next row's gap_before_min = 3
+               T0 + 600, T0 + 660}                  # a stamp over two minutes that DO have rows
+    r = bforward(mins, stamped)
+    return r["clean"] is False and r["unmeasured_min"] == 5, r
+
+
+def t_book_exit_after_300s_of_recorded_closes():
+    down = bflat(T0, 20, 99.0, 99.1)                # mid 99.05 < lo 100 from the first close
+    r = bforward(down)
+    holed = bforward(down[:3] + down[4:], stamped={T0 + 180})   # a hole in the streak restarts it
+    ok = (r["exit"] == "down" and abs(r["exit_h"] * 3600 - (60 + 300)) < 1e-6
+          and holed["exit"] == "down" and abs(holed["exit_h"] * 3600 - (240 + 60 + 300)) < 1e-6)
+    return ok, (r["exit_h"], holed["exit_h"])
+
+
+def t_book_deploy_at_the_ask_or_skip():
+    r = bforward(bflat(T0, 20, 104.5, 104.6), deploy=(104.3, 104.7))
+    with_test_pair(0.0)
+    missing = R.book_forward(TEST, book_of(bflat(T0, 20, 104.5, 104.6)), T0, LEVELS, "arith", 1200)
+    return r.get("deploy_px") == 104.7 and missing.get("skip") == "no recorded book at t", (r, missing)
+
+
+def t_load_book_reads_the_recorder_schema():
+    d = Path(tempfile.mkdtemp(prefix="bnus_book_"))
+    (d / "SOL_USDT").mkdir()
+    hdr = ("minute_utc,minute_ms,mid_open,mid_high_sampled,mid_low_sampled,mid_close,bid_close,ask_close,"
+           "spread_bps_median,spread_bps_max,polls_ok,invalid_n,gap_before_min,first_sample_ms,last_sample_ms\n")
+    def row(m, bid, ask, gap):
+        mid = (bid + ask) / 2
+        return f"x,{m * 1000},{mid},{mid},{mid},{mid},{bid},{ask},1,1,20,0,{gap},0,0\n"
+    (d / "SOL_USDT" / "2026-09-27.csv").write_text(
+        hdr + row(T0, 1.0, 1.1, -1) + row(T0 + 60, 1.0, 1.1, 0) + row(T0 + 300, 1.2, 1.3, 3)
+        + row(T0 + 360, 1.2, 1.3, 0) + "x,torn", encoding="utf-8")
+    (d / "SOL_USDT" / "2026-09-28.v2.csv").write_text("minute_utc,other\nx,1\n", encoding="utf-8")
+    b = R.load_book("SOLUSDT", cut=T0 + 360, root=d)
+    ok = (set(b["rows"]) == {T0, T0 + 60, T0 + 300} and b["stamped"] == {T0 + 120, T0 + 180, T0 + 240}
+          and b["skipped_files"] == ["2026-09-28.v2.csv"] and b["rows"][T0 + 300][:2] == (1.2, 1.3))
+    return ok, b
+
+
+def t_decider_gives_no_verdict_early_or_underpowered():
+    good = ([{"outcome": "deployed", "clean": True, "net_pct": 1.0, "exit": None}] * 60
+            + [{"outcome": "deployed", "clean": True, "net_pct": -4.0, "exit": "down"}] * 5)
+    early = R.decider_verdict(good, R.utc("2026-10-20"))["verdict"]
+    ontime = R.decider_verdict(good, R.utc("2026-10-28"))["verdict"]
+    waiting = R.decider_verdict(good[:30], R.utc("2026-11-01"))["verdict"]
+    late = R.decider_verdict(good[:30], R.utc("2026-11-27"))["verdict"]
+    ok = (early.startswith("DEFERRED") and ontime == "PASSED" and waiting.startswith("DEFERRED")
+          and late.startswith("NOT PASSED (underpowered"))
+    return ok, (early, ontime, waiting, late)
+
+
 TESTS = [t_registered_constants_match_prereg, t_scanner_cfg_is_oracle_default_plus_two_overrides,
          t_minute_prints_order_and_silence, t_screen_touch_never_fills,
          t_screen_silent_minutes_never_fill, t_screen_exit_after_300s_not_299,
          t_screen_deploy_and_exit_pay_the_half_spread,
          t_screen_missing_minutes_are_unmeasured_never_filled, t_screen_exit_agrees_with_the_bot,
-         t_lookback_rows_aggregate_and_refuse_holes, t_nearest_rank_and_pass_rule_fail_closed]
+         t_lookback_rows_aggregate_and_refuse_holes, t_nearest_rank_and_pass_rule_fail_closed,
+         t_book_ask_at_or_below_level_fills_the_buy, t_book_bid_at_or_above_level_fills_the_sell,
+         t_book_mid_or_print_crossing_never_fills, t_book_sides_never_cross_fill,
+         t_book_one_minute_fills_every_crossed_level_at_its_price,
+         t_book_gap_stamps_and_missing_rows_are_unmeasured, t_book_exit_after_300s_of_recorded_closes,
+         t_book_deploy_at_the_ask_or_skip, t_load_book_reads_the_recorder_schema,
+         t_decider_gives_no_verdict_early_or_underpowered]
 
 
 def run_tests(quiet=False) -> dict:
@@ -295,7 +406,60 @@ def _mut_mean_only():
     return lambda: setattr(R, "summarize", real)
 
 
+def _mut_book_fills_on_mid():
+    """DECIDER fills on a trade-like price (the mid) instead of the book's sides."""
+    real = R.apply_book_minute
+    R.apply_book_minute = lambda g, bid, ask, ts: g.on_print((bid + ask) / 2, ts)
+    return lambda: setattr(R, "apply_book_minute", real)
+
+
+def _mut_book_unclamped_sides():
+    """DECIDER presents both quotes raw, so the ask can fill a SELL."""
+    real = R.apply_book_minute
+
+    def m(g, bid, ask, ts):
+        return (g.on_print(math.nextafter(ask, -math.inf), ts)
+                + g.on_print(math.nextafter(bid, math.inf), ts))
+    R.apply_book_minute = m
+    return lambda: setattr(R, "apply_book_minute", real)
+
+
+def _mut_book_interpolates_gaps():
+    """DECIDER ignores gap stamps and carries the last row across missing minutes."""
+    real = R._measured
+
+    def m(book, minute):
+        rows = book["rows"]
+        prior = [k for k in rows if k <= minute]
+        return rows[max(prior)] if prior else None
+    R._measured = m
+    return lambda: setattr(R, "_measured", real)
+
+
+def _mut_book_exit_on_240s():
+    real = R.EXIT_AFTER_S
+
+    def undo():
+        R.EXIT_AFTER_S = real
+    R.EXIT_AFTER_S = 240.0
+    return undo
+
+
+def _mut_decider_early_verdict():
+    real = R.DECIDER_EARLIEST_CUT
+    R.DECIDER_EARLIEST_CUT = 0
+    return lambda: setattr(R, "DECIDER_EARLIEST_CUT", real)
+
+
 MUTANTS = [
+    ("B  DECIDER fills on the mid (a print-like price)", _mut_book_fills_on_mid,
+     {"t_book_mid_or_print_crossing_never_fills"}),
+    ("B2 DECIDER presents both sides unclamped", _mut_book_unclamped_sides, {"t_book_sides_never_cross_fill"}),
+    ("C2 DECIDER interpolates across stamped gaps", _mut_book_interpolates_gaps,
+     {"t_book_gap_stamps_and_missing_rows_are_unmeasured"}),
+    ("E2 DECIDER exits after 240 s", _mut_book_exit_on_240s, {"t_book_exit_after_300s_of_recorded_closes"}),
+    ("D  DECIDER gives a verdict before 2026-10-28", _mut_decider_early_verdict,
+     {"t_decider_gives_no_verdict_early_or_underpowered"}),
     ("A  SCREEN fills on touch", _mut_touch_fills, {"t_screen_touch_never_fills"}),
     ("A2 SCREEN prints in zero-trade minutes", _mut_silent_minutes_print, {"t_screen_silent_minutes_never_fill"}),
     ("C  forward-fills missing minutes", _mut_interpolate_missing,

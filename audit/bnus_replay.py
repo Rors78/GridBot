@@ -6,6 +6,9 @@ implements it and nothing else, and every constant below is a registered one.
     python -X utf8 audit/bnus_replay.py fetch     # 1m klines -> cache (paced, resumable)
     python -X utf8 audit/bnus_replay.py screen    # SCREEN: trade-price replay
     python -X utf8 audit/bnus_replay.py report    # per-pair table from the last screen run
+    python -X utf8 audit/bnus_replay.py decider --cut 2026-10-28   # DECIDER (registered verdict)
+    python -X utf8 audit/bnus_replay.py smoke --smoke-t 2026-09-27T12:00 --smoke-hours 3
+                                                  # harness smoke on recorded data: NO verdict
 
 The engine is gridbot.Grid, unmodified: the harness only decides which price
 Grid sees and when. It never computes a fill, a fee or a P&L. The scanner is
@@ -180,6 +183,30 @@ def fetch_pair(sym: str, start: int = SCREEN_DATA_START, end: int = SCREEN_DATA_
     return stats
 
 
+def fetch_range(sym: str, start: int, end: int, pace_s: float = 0.3, session=None, log=print) -> dict:
+    """1m klines for [start, end) in memory (the DECIDER's lookback: ~40 days,
+    fetched per run, not cached). Same paging and API hygiene as fetch_pair."""
+    import requests
+    session = session or requests.Session()
+    session.headers["User-Agent"] = "gridbot-replay"
+    cols = {k: [] for k in KLINE_FIELDS}
+    cursor = start * 1000
+    while cursor < end * 1000:
+        page, _ = _get(session, "klines", {"symbol": sym, "interval": "1m", "startTime": cursor,
+                                           "endTime": end * 1000 - 1, "limit": 1000}, log)
+        if not page:
+            break
+        for k in page:
+            cols["open_ms"].append(int(k[0]))
+            for i, name in ((1, "o"), (2, "h"), (3, "l"), (4, "c"), (5, "vb"), (7, "vq")):
+                cols[name].append(float(k[i]))
+            cols["n"].append(int(k[8]))
+        cursor = int(page[-1][0]) + MIN_S * 1000
+        time.sleep(pace_s)
+    return {k: np.asarray(v, dtype=np.int64 if k in ("open_ms", "n") else np.float64)
+            for k, v in cols.items()}
+
+
 def load_klines(sym: str) -> dict:
     files = sorted((CACHE / "klines_1m" / sym).glob("*.npz"))
     if not files:
@@ -323,6 +350,174 @@ def screen_pair(sym: str) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- DECIDER --
+RECORDER = Path(os.environ.get("GRIDBOT_RECORDER_DIR")
+                or r"D:\GoldenEye\output\binanceus\book_candles")
+DECIDER_FIRST_T = utc("2026-09-28")
+DECIDER_EARLIEST_CUT = utc("2026-10-28")
+DECIDER_DEADLINE = utc("2026-11-27")
+BOOK_COLUMNS = ("minute_ms", "mid_close", "bid_close", "ask_close", "gap_before_min")
+
+
+def load_book(sym: str, cut: int, root: Path | None = None) -> dict:
+    """GoldenEye's recorder candles for <BASE>_USDT with minute open < cut,
+    read as static files (ruling 2: offline research, no process coupling).
+
+    Returns {minute_s: (bid, ask, mid)} plus the set of UNMEASURED minutes:
+    every minute a row's gap_before_min > 0 says is missing. Minutes with no
+    row are unmeasured too; the forward sim treats both the same. Nothing is
+    ever filled in. A file whose header lacks the schema's columns is skipped
+    and named, never guessed at."""
+    import csv as _csv
+    root = Path(root or RECORDER)
+    base = sym[:-4] if sym.endswith("USDT") else sym
+    rows, stamped, skipped = {}, set(), []
+    for f in sorted((root / f"{base}_USDT").glob("*.csv")):
+        with open(f, newline="", encoding="utf-8") as fh:
+            rd = _csv.DictReader(fh)
+            if not set(BOOK_COLUMNS) <= set(rd.fieldnames or ()):
+                skipped.append(f.name)
+                continue
+            for r in rd:
+                try:
+                    m = int(r["minute_ms"]) // 1000
+                    bid, ask, mid = float(r["bid_close"]), float(r["ask_close"]), float(r["mid_close"])
+                    gap = int(r["gap_before_min"])
+                except (TypeError, ValueError, KeyError):
+                    continue                     # a torn line is unmeasured, not a guess
+                if m >= cut:
+                    continue
+                rows[m] = (bid, ask, mid)
+                for g in range(1, gap + 1):      # gap > 0: those minutes are UNMEASURED
+                    stamped.add(m - g * MIN_S)
+    return {"rows": rows, "stamped": stamped, "skipped_files": skipped}
+
+
+def _measured(book: dict, m: int):
+    """(bid, ask, mid) for minute open m, or None if unmeasured."""
+    if m in book["stamped"]:
+        return None
+    return book["rows"].get(m)
+
+
+def apply_book_minute(g: "gridbot.Grid", bid: float, ask: float, ts: float) -> list:
+    """One recorded minute into Grid, so Grid's OWN loop does the filling
+    (every crossed level at its own price). BUY at L fills iff ask <= L; SELL
+    at L fills iff bid >= L. on_print's test is strict (<, >), so each quote
+    is nudged one ulp toward the level; the side not being presented is
+    masked by clamping to the neighbouring level, which on_print cannot
+    cross. Buy side first, then the sell side against the updated ladder.
+    Both sides cannot cross in one minute: that would need ask <= L < L' <= bid."""
+    fills = []
+    e = g.empty
+    if e > 0:                                        # a BUY rests at e-1
+        p = math.nextafter(ask, -math.inf)
+        if e + 1 < g.n:
+            p = min(p, g.levels[e + 1])              # never reaches a SELL
+        fills += g.on_print(p, ts)
+    e = g.empty
+    if e < g.n - 1:                                  # a SELL rests at e+1
+        p = math.nextafter(bid, math.inf)
+        if e > 0:
+            p = max(p, g.levels[e - 1])              # never reaches a BUY
+        fills += g.on_print(p, ts)
+    return fills
+
+
+def book_forward(sym: str, book: dict, t: int, levels: list, kind: str,
+                 horizon_s: int = HORIZON_S, meta: dict | None = None) -> dict:
+    """Deploy at the ask of the minute ending at t, fill by book crossing
+    through Grid.on_print, exit by GridBot's 300 s rule on recorded minute
+    closes, mark at 240 h at the bid. Unmeasured minutes are stepped over:
+    never filled, never timed through."""
+    dep = _measured(book, t - MIN_S)
+    if dep is None:
+        return {"skip": "no recorded book at t"}
+    px = dep[1]
+    if not (levels[0] < px < levels[-1]):
+        return {"skip": "deploy price outside the band"}
+    g = gridbot.Grid(sym, sym, levels, kind, ALLOC, MAKER_PCT, TAKER_PCT, meta)
+    g.deploy(px, float(t))
+    unmeasured, outside_first, exit_at, last_bid = 0, None, None, dep[0]
+    for m in range(t, t + horizon_s, MIN_S):
+        q = _measured(book, m)
+        if q is None:
+            unmeasured += 1
+            outside_first = None                 # the 300 s must be RECORDED time
+            continue
+        bid, ask, mid = q
+        ts = float(m + MIN_S)                    # the values are the minute's close
+        last_bid = bid
+        apply_book_minute(g, bid, ask, ts)
+        if mid < g.lo or mid > g.hi:
+            if outside_first is None:
+                outside_first = ts
+            elif ts - outside_first >= EXIT_AFTER_S:
+                side = "down" if mid < g.lo else "up"
+                g.close(bid, ts, f"price {side} band for 300s (book)")
+                exit_at = {"side": side, "at": ts}
+                break
+        else:
+            outside_first = None
+    total = g.realised if exit_at else g.mark(last_bid)["total"]
+    return {"net_pct": total / ALLOC * 100.0, "exit": exit_at["side"] if exit_at else None,
+            "exit_h": ((exit_at["at"] - t) / 3600.0) if exit_at else None,
+            "fills": g.fills, "round_trips": g.round_trips, "unmeasured_min": unmeasured,
+            "clean": unmeasured == 0, "deploy_px": px}
+
+
+def decider_times(cut: int) -> list[int]:
+    return list(range(DECIDER_FIRST_T, cut - HORIZON_S + 1, STEP_S))
+
+
+def decider_pair(sym: str, cut: int, times=None, horizon_s: int = HORIZON_S,
+                 klines: dict | None = None, book_root=None) -> list[dict]:
+    """Registered DECIDER rows for one pair. Lookback klines are fetched for
+    the span the evaluations need unless given."""
+    times = decider_times(cut) if times is None else times
+    if not times:
+        return []
+    if klines is None:
+        klines = fetch_range(sym, times[0] - LOOKBACK_BARS * BAR_S, times[-1])
+    book = load_book(sym, cut, book_root)
+    out = []
+    for t in times:
+        row = {"pair": sym, "t": t, "date": datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d %H:%M")}
+        ev = evaluate_at(sym, klines, t)
+        if "rec" in ev:
+            r = ev["rec"]
+            row.update({"qualified": bool(r["qualified"]), "levels": r["levels"], "kind": r["kind"],
+                        "step_pct": r["step_pct"], "span_pct": r["span_pct"], "yield_day": r["yield_day"]})
+        if "levels" not in ev:
+            row["outcome"] = ev.get("skip") and "skip" or ev.get("reject") and "reject" or "refused"
+            row["why"] = ev.get("skip") or ev.get("reject") or ev.get("refused")
+            out.append(row)
+            continue
+        res = book_forward(sym, book, t, ev["levels"], ev["rec"]["kind"], horizon_s)
+        row.update({"outcome": "skip", "why": res["skip"]} if "skip" in res else {"outcome": "deployed", **res})
+        out.append(row)
+    return out
+
+
+def decider_verdict(rows: list[dict], cut: int) -> dict:
+    """The registered verdict (prereg 5.2, 6). Before the earliest cut there
+    is none; below the sample floors it waits, and at the deadline an
+    underpowered run is NOT PASSED."""
+    s = summarize(rows, "DECIDER")
+    floor_grids, floor_down = FLOORS["DECIDER"]
+    enough = s["clean"] >= floor_grids and s["down"] >= floor_down
+    if cut < DECIDER_EARLIEST_CUT:
+        s["verdict"] = "DEFERRED: cut is before 2026-10-28 00:00 UTC (registered earliest)"
+    elif not enough and cut < DECIDER_DEADLINE:
+        s["verdict"] = (f"DEFERRED: {s['clean']} clean grids / {s['down']} downside exits, "
+                        f"floors {floor_grids} / {floor_down}; next daily cut")
+    elif not enough:
+        s["verdict"] = "NOT PASSED (underpowered at the 2026-11-27 deadline)"
+    else:
+        s["verdict"] = "PASSED" if s["all_met"] else "NOT PASSED"
+    return s
+
+
 # ---------------------------------------------------------------- metrics --
 def nearest_rank(values: list[float], q: float) -> float | None:
     if not values:
@@ -434,13 +629,42 @@ def _run_screen(workers: int) -> Path:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("cmd", choices=("fetch", "screen", "report"))
+    p.add_argument("cmd", choices=("fetch", "screen", "report", "decider", "smoke"))
     p.add_argument("--pairs", default=",".join(PAIRS))
     p.add_argument("--workers", type=int, default=9)
     p.add_argument("--pace", type=float, default=0.3)
     p.add_argument("--results", default=None, help="a screen_*.jsonl (default: newest)")
     p.add_argument("--csv", default=None, help="report: also write the per-grid rows here")
+    p.add_argument("--cut", default=None, help="decider data cut, 'YYYY-MM-DD' (00:00 UTC, exclusive)")
+    p.add_argument("--smoke-t", default=None, help="smoke: comma-separated 'YYYY-MM-DDTHH:MM' UTC times")
+    p.add_argument("--smoke-hours", type=float, default=3.0, help="smoke: horizon in hours (NOT registered)")
     a = p.parse_args(argv)
+    if a.cmd in ("decider", "smoke"):
+        pairs = a.pairs.split(",")
+        if a.cmd == "decider":
+            cut = utc(a.cut) if a.cut else (int(time.time()) // 86400) * 86400
+            rows = [r for sym in pairs for r in decider_pair(sym, cut)]
+            label, horizon = "DECIDER", HORIZON_S
+        else:
+            times = [calendar.timegm(datetime.strptime(x, "%Y-%m-%dT%H:%M").timetuple())
+                     for x in (a.smoke_t or "").split(",") if x]
+            horizon = int(a.smoke_hours * 3600)
+            cut = max(times) + horizon
+            rows = [r for sym in pairs for r in decider_pair(sym, cut, times=times, horizon_s=horizon)]
+            label = "SMOKE -- not a measurement, not the registered horizon, no verdict"
+        out = CACHE / "results"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{a.cmd}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+        summary = decider_verdict(rows, cut) if a.cmd == "decider" else summarize(rows, "DECIDER")
+        if a.cmd == "smoke":
+            summary.pop("all_met", None)
+            summary.pop("conditions", None)
+        print(json.dumps({"label": label, "file": str(path), "cut": cut, "horizon_h": horizon / 3600,
+                          "summary": summary}, indent=1, default=str))
+        return 0
     if a.cmd == "fetch":
         import requests
         s = requests.Session()
