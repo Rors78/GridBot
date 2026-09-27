@@ -1439,5 +1439,120 @@ check("recon is served in status.json", b_lv.snapshot()["live"]["recon"]["usd"] 
 check("a bot with no trade key serves order_path off",
       make_bot(Path(tempfile.mkdtemp(prefix="gridbot_test_"))).snapshot()["live"]["order_path"] == "off")
 
+# -----------------------------------------------------------------------------
+print("\n26. retire.py: KILLED row, the bot's own close path, never a STOP row")
+import retire  # noqa: E402
+
+
+def retire_fixture():
+    """A book as a hard kill leaves it: START with no STOP, two open grids
+    with prints, saved by the bot."""
+    d = Path(tempfile.mkdtemp(prefix="gridbot_test_"))
+    b = make_bot(d, capital="330", max_grids="2")
+    b.journal("START", version=gridbot.VERSION, capital=330.0, max_grids=2, grids=[])
+    for sym, lv, px, prints in (
+            ("AAA/USD", arith(), 104.6, [(103.4, 1010.0), (105.7, 1020.0), (104.2, 1030.0)]),
+            ("BBB/USD", oracle.make_levels(50.0, 60.0, 11, "arith"), 55.2, [(53.9, 1015.0)])):
+        g = Grid(sym, sym.replace("/", ""), lv, "arith", 165.0, 0.22, 0.38)
+        g.deploy(px, 1000.0)
+        for p, t in prints:
+            g.on_print(p, t)
+        b.grids[sym] = g
+    b.save_state()
+    return d
+
+
+def journal_rows(d):
+    return [json.loads(x) for x in (d / "journal.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+d_r = retire_fixture()
+saved = json.loads((d_r / "state.json").read_text(encoding="utf-8"))["grids"]
+expect = {}                                  # the same close, done independently on the saved grids
+for s, gd in saved.items():
+    g = Grid.from_dict(gd)
+    expect[s] = g.close(g.last_px, 2000.0, "independent")
+res_r = retire.retire(d_r, killed_at=2000.0, evidence="test power-off", era_note="test era over",
+                      clock=lambda: 2000.0 + 30 * 3600)
+rows_r = journal_rows(d_r)
+ev_r = [r["event"] for r in rows_r]
+killed_r = [r for r in rows_r if r["event"] == "KILLED"]
+check("retire writes one KILLED row, reconstructed, and never a STOP row",
+      len(killed_r) == 1 and killed_r[0]["reconstructed"] is True and "STOP" not in ev_r
+      and killed_r[0]["killed_at_epoch"] == 2000.0 and killed_r[0]["evidence"] == "test power-off", ev_r)
+check("retire adds no START row, and KILLED comes before every EXIT",
+      ev_r.count("START") == 1 and "KILLED" in ev_r and "EXIT" in ev_r
+      and ev_r.index("KILLED") < ev_r.index("EXIT"), ev_r)
+exits_r = [r for r in rows_r if r["event"] == "EXIT"]
+check("one EXIT per open grid, closed at the last price the bot saw",
+      sorted(r["symbol"] for r in exits_r) == ["AAA/USD", "BBB/USD"]
+      and all(r["close_px"] == saved[r["symbol"]]["last_px"] for r in exits_r),
+      [(r["symbol"], r["close_px"]) for r in exits_r])
+check("closed_at is the kill time, not the booking time",
+      all(r["closed_at"] == 2000.0 for r in exits_r), [r["closed_at"] for r in exits_r])
+check("each exit reason names the stale last print and its age",
+      all("last print the bot saw" in r["close_reason"] and "stale price" in r["close_reason"]
+          and f"{(2000.0 + 30 * 3600 - saved[r['symbol']]['last_ts']) / 3600:.1f} h before this booking"
+          in r["close_reason"] for r in exits_r),
+      [r["close_reason"] for r in exits_r])
+check("the bot's close path books exactly what Grid.close books on the saved grids",
+      all(close(r["realised"], expect[r["symbol"]]["realised"])
+          and close(r["fees"], expect[r["symbol"]]["fees"]) for r in exits_r),
+      [(r["symbol"], r["realised"], expect[r["symbol"]]["realised"]) for r in exits_r])
+st_r = json.loads((d_r / "state.json").read_text(encoding="utf-8"))
+check("state.json: no open grids; closed totals equal the EXIT rows",
+      st_r["grids"] == {} and st_r["closed_totals"]["count"] == 2
+      and close(st_r["closed_totals"]["realised"], sum(r["realised"] for r in exits_r))
+      and close(st_r["closed_totals"]["fees"], sum(r["fees"] for r in exits_r)),
+      st_r["closed_totals"])
+check("state.json's closed list ends with the same two summaries",
+      sorted((c["symbol"], round(c["realised"], 9)) for c in st_r["closed"][-2:])
+      == sorted((r["symbol"], round(r["realised"], 9)) for r in exits_r))
+sts_r = json.loads((d_r / "status.json").read_text(encoding="utf-8"))
+check("status.json shows the retired book", sts_r["grids_active"] == 0
+      and sts_r["closed"]["count"] == 2 and sts_r["mode"] == "paper", sts_r["closed"])
+check("the result reports each close and the totals", len(res_r["closes"]) == 2
+      and res_r["totals_after"]["count"] == 2 and res_r["totals_before"]["count"] == 0)
+
+
+def refused(fn):
+    try:
+        fn()
+    except retire.RetireRefused as e:
+        return str(e)
+    return None
+
+
+snap_r = (d_r / "journal.jsonl").read_bytes(), (d_r / "state.json").read_bytes()
+why = refused(lambda: retire.retire(d_r, 2000.0, "again", "again", clock=lambda: 9e9))
+check("a second retire is refused (the last lifecycle row is KILLED) and writes nothing",
+      why is not None and "KILLED" in why
+      and snap_r == ((d_r / "journal.jsonl").read_bytes(), (d_r / "state.json").read_bytes()), why)
+
+d_s = retire_fixture()
+(d_s / "journal.jsonl").open("a", encoding="utf-8").write(json.dumps({"ts": "x", "event": "STOP"}) + "\n")
+why = refused(lambda: retire.retire(d_s, 2000.0, "e", "n", clock=lambda: 9e9))
+check("a clean STOP after the START is refused: nothing was killed", why is not None and "STOP" in why, why)
+
+d_l = retire_fixture()
+held = gridbot.acquire_single_instance(d_l / "gridbot.lock")
+before_l = (d_l / "journal.jsonl").read_bytes()
+why = refused(lambda: retire.retire(d_l, 2000.0, "e", "n", clock=lambda: 9e9))
+held.close()
+check("retire refuses while GridBot holds the instance lock, writing nothing",
+      why is not None and "running" in why and (d_l / "journal.jsonl").read_bytes() == before_l, why)
+
+d_k = retire_fixture()
+why = refused(lambda: retire.retire(d_k, 1025.0, "e", "n", clock=lambda: 9e9))
+check("a kill time before a grid's last print is refused",
+      why is not None and "after the stated kill time" in why, why)
+
+d_d = retire_fixture()
+before_d = (d_d / "journal.jsonl").read_bytes(), (d_d / "state.json").read_bytes()
+res_d = retire.retire(d_d, 2000.0, "e", "n", clock=lambda: 9e9, dry_run=True)
+check("--dry-run retires a copy and leaves the real files byte-identical",
+      res_d["dry_run"] and Path(res_d["data_dir"]) != d_d.resolve() and len(res_d["closes"]) == 2
+      and before_d == ((d_d / "journal.jsonl").read_bytes(), (d_d / "state.json").read_bytes()))
+
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
