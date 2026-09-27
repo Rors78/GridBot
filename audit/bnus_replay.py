@@ -355,6 +355,67 @@ def summarize(rows: list[dict], role: str) -> dict:
             "conditions": cond, "all_met": all(cond.values())}
 
 
+def _fmt(v, spec="+.2f"):
+    return "-" if v is None else format(v, spec)
+
+
+def report_markdown(rows: list[dict], role: str = "SCREEN") -> str:
+    """The registered report (prereg section 7): per-pair and pooled rows,
+    reasons, the qualified-only subset, the comparison line, the caveat."""
+    from collections import Counter
+    pairs = [p for p in PAIRS if any(r["pair"] == p for r in rows)]
+    head = ("| pair | evals | skipped | scanner-rejected | ladder refused | deployed | clean | "
+            "mean % | median % | worst-tenth down % | down / up / held | fills per grid-day | "
+            "round trips per grid |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines = [head]
+
+    def line(label, rs):
+        s = summarize(rs, role)
+        clean = [r for r in rs if r.get("outcome") == "deployed" and r.get("clean")]
+        days = [((r["exit_h"] or 240.0) if r.get("exit") else 240.0) / 24.0 for r in clean]
+        fpd = (sum(r["fills"] for r in clean) / sum(days)) if clean else None
+        rtg = (statistics.fmean([r["round_trips"] for r in clean])) if clean else None
+        n = Counter(r.get("outcome") for r in rs)
+        lines.append(f"| {label} | {len(rs)} | {n['skip']} | {n['reject']} | {n['refused']} | {n['deployed']} | "
+                     f"{s['clean']} | {_fmt(s['mean'])} | {_fmt(s['median'])} | {_fmt(s['tail_p10_down'])} | "
+                     f"{s['down']} / {s['up']} / {s['held']} | {_fmt(fpd, '.2f')} | {_fmt(rtg, '.2f')} |")
+    for p in pairs:
+        line(p, [r for r in rows if r["pair"] == p])
+    line("**pooled**", rows)
+    s = summarize(rows, role)
+    q = summarize([r for r in rows if r.get("qualified")], role)
+    reasons = Counter((r.get("outcome"), r.get("why")) for r in rows if r.get("outcome") != "deployed")
+    levels = Counter(r.get("levels") for r in rows if r.get("outcome") == "deployed")
+    kinds = Counter(r.get("kind") for r in rows if r.get("outcome") == "deployed")
+    steps = [r["step_pct"] for r in rows if r.get("outcome") == "deployed"]
+    dates = sorted(r["date"] for r in rows)
+    out = [f"## {role}: per-pair and pooled (clean grids; % of the grid's capital; horizon 240 h)", "",
+           f"Evaluations {dates[0]} to {dates[-1]} UTC, every 2 days, {len(pairs)} pairs.", "", *lines, "",
+           "**Pass-rule conditions on this data** (for the SCREEN a number check, never a verdict):", ""]
+    out += [f"- {k}: {'met' if v else 'NOT met'}" for k, v in s["conditions"].items()]
+    out += ["", f"**{role}: pass-rule conditions {'met' if s['all_met'] else 'not met'}.**", "",
+            f"Qualified-only subset (never the statistic): {q['clean']} clean grids, mean {_fmt(q['mean'])}%, "
+            f"median {_fmt(q['median'])}%, worst-tenth down {_fmt(q['tail_p10_down'])}% "
+            f"({q['down']} downside exits).", "",
+            "Not deployed, by reason: " + "; ".join(f"{o} `{w}` x{c}" for (o, w), c in reasons.most_common()), "",
+            f"Ladders deployed: levels {dict(sorted(levels.items()))}; kinds {dict(kinds)}; "
+            f"step % median {_fmt(statistics.median(steps) if steps else None, '.2f')} "
+            f"(p10 {_fmt(nearest_rank(steps, 0.1), '.2f')}, p90 {_fmt(nearest_rank(steps, 0.9), '.2f')}).", ""]
+    return "\n".join(out)
+
+
+def write_grid_csv(rows: list[dict], path: Path) -> None:
+    cols = ("pair", "date", "outcome", "why", "qualified", "levels", "kind", "step_pct", "span_pct",
+            "yield_day", "deploy_px", "net_pct", "exit", "exit_h", "fills", "round_trips",
+            "unmeasured_min", "clean")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([("" if r.get(c) is None else (f"{r[c]:.6g}" if isinstance(r.get(c), float) else r[c]))
+                        for c in cols])
+
+
 # ------------------------------------------------------------------- CLI --
 def _run_screen(workers: int) -> Path:
     from multiprocessing import Pool
@@ -378,6 +439,7 @@ def main(argv=None) -> int:
     p.add_argument("--workers", type=int, default=9)
     p.add_argument("--pace", type=float, default=0.3)
     p.add_argument("--results", default=None, help="a screen_*.jsonl (default: newest)")
+    p.add_argument("--csv", default=None, help="report: also write the per-grid rows here")
     a = p.parse_args(argv)
     if a.cmd == "fetch":
         import requests
@@ -392,7 +454,10 @@ def main(argv=None) -> int:
         return 0
     path = Path(a.results) if a.results else max((CACHE / "results").glob("screen_*.jsonl"))
     rows = [json.loads(x) for x in open(path, encoding="utf-8")]
-    print(json.dumps({"file": str(path), "pooled": summarize(rows, "SCREEN")}, indent=1, default=str))
+    print(report_markdown(rows, "SCREEN"))
+    if a.csv:
+        write_grid_csv(rows, Path(a.csv))
+        print(f"\n(per-grid rows: {a.csv})")
     return 0
 
 
