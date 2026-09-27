@@ -37,6 +37,14 @@ deploys standard spot grids on the scanner's qualified picks, fills them from
 Kraken's **public** trade stream (trade-through, never touch), and keeps its
 books in JSON files in this folder.
 
+**Kraken era retired, 2026-09-27.**
+- **The bot died without a clean stop.** A Start-menu power-off at 2026-09-26 08:05:33 hard-killed it (START 2026-09-25 20:14:57, no STOP), and it stayed down.
+- **Its book was closed out by operator ruling.** The three open paper grids (JUP, TIA, TRUMP; deployed 2026-09-23, 5 round trips) were closed by `retire.py`:
+  - one reconstructed `KILLED` journal row, never a forged STOP;
+  - then `Bot.close_grid` at the last price the bot saw, with each exit reason naming that price's age.
+- **GridBot is parked:** not running, not auto-started. Starting `run.bat` / `launch.bat` would open a NEW Kraken paper book. Don't, unless the operator orders it.
+- **Its future is decided by the pre-registered Binance.US replay** (`audit/PORT_AUDIT_BINANCEUS_2026-09-27.md`, section 13).
+
 It **never places an order**. Since 2026-09-24 it is a *validate-only
 live-readiness build* (Jeremy's direction: "as close to live key ready as
 you can get it"): `broker.py` mirrors every deploy and fill to Kraken's
@@ -65,10 +73,11 @@ is a non-goal **until the go-live gate below is passed and Jeremy signs off**.
     python -X utf8 gridbot.py --status      print status.json and exit
     python -X utf8 test_gridbot.py          tests (no network, temp dirs only)
 
-The desktop shortcut targets `launch.bat`. GridBot IS auto-started at boot:
-the Scheduled Task `GridBot` (onlogon) runs `start_hidden.vbs` -> `run.bat`
-with no window, so no tab or console owns the bot (since 2026-09-24; the old
-`Startup\GridBot.lnk` -> Git Bash tab is in `D:\_backups\`). The old parked
+The desktop shortcut targets `launch.bat`. GridBot is **NOT auto-started
+(2026-09-27)**:
+- **The Scheduled Task `GridBot` still exists but is Disabled.** It is the onlogon task that runs `start_hidden.vbs` -> `run.bat` with no window. It was found disabled on 2026-09-27 (last run 2026-09-24 22:58) and is kept disabled by operator ruling.
+- **Enabling it is the operator's call.**
+- **History:** from 2026-09-24 it was the boot path. The old `Startup\GridBot.lnk` -> Git Bash tab is in `D:\_backups\`. The old parked
 `startup_disabled\GridBot.lnk` (pointed at run.bat) was moved to
 `D:\_backups\GridBot_audit_caches_2026-09-24\` on 2026-09-24, with the audit pickles,
 the `.pre-safety` copies and `audit/replay2/` (its RESULTS.md and rp.py were never in git).
@@ -89,6 +98,7 @@ first, python second. It matches on `D:\GridBot` paths, never on "python".
 | `oracle.py` | GridPick Oracle v3.1 scanner. **Read-only: do not modify.** The bot imports `oracle.make_levels` and `oracle.PairBook` so it trades exactly the ladder the scanner replayed. |
 | `broker.py` | Kraken order-path plumbing, **validate-only build**. `KrakenBroker` (signed private calls: Balance, OpenOrders, AddOrder `validate=true` -- refuses anything else), `PairRules` (tick/lot rounding, ordermin/costmin), `OrderValidator` (background mirror worker), `grid_userref` (int32 scoping every would-be order to its grid). Deliberately **no cancel path**: the account trades manually too. |
 | `test_gridbot.py` | Self-contained test runner (`check()` PASS/FAIL, exits 1 on any failure). Fakes every Kraken call. |
+| `retire.py` | One-off book retirement through the bot's own close path: one reconstructed `KILLED` row (never STOP), then one `EXIT` per open grid at the last price the bot saw, closed_at = the kill time. It refuses and writes nothing if the bot holds the lock, the journal's last lifecycle row is not an unmatched START, or a grid can't be restored. `--dry-run` retires a copy. Used 2026-09-27 to end the Kraken era. |
 | `tui/lattice.py` | The GRIDPICK LATTICE console (Rich Live). Read-only: reads status.json, scan.json, journal.jsonl, gridbot.log and scanner.log via `tui/feeds.py`. Never imports gridbot, never calls Kraken. Header = bot/feed/scanner liveness, capital, book, guard. Cards = one per grid with its resting ladder (B/S/○/◆). Oracle = every scan metric. Bottom = RISK, P/L, TAPE, LOG. Keys: enter detail, l log, t tape, ? help. Layouts at 176+/140/110/90 columns. |
 | `tui/feeds.py`, `glyphs.py`, `theme.py`, `sixelimg.py`, `assets/` | TUI data feeds (StatusFeed, OracleFeed, JournalFeed, LogFeed, ScannerLogFeed), glyph map, theme, logo rendering. Feeds pick values out; they never compute a trading quantity. |
 | `run.bat`, `run_gitbash.sh` | Restart loops (Windows / Git Bash). |
@@ -104,7 +114,7 @@ Runtime files (all gitignored, all written atomically tmp + os.replace):
 |---|---|
 | `state.json` (+`.bak`) | The books. Restored on start; grids catch up from REST before any exit decision. |
 | `status.json` | Snapshot every few seconds: equity, per-grid P/L, feed, scanner, picks, events. **This is how you answer "how is GridBot doing".** |
-| `journal.jsonl` | Append-only: START, STOP, FILL, DEPLOY, EXIT rows with exchange timestamps. |
+| `journal.jsonl` | Append-only: START, STOP, FILL, DEPLOY, EXIT rows with exchange timestamps. A `KILLED` row (`reconstructed: true`, written by `retire.py`) records a hard kill found after the fact: STOP is only ever a clean stop. |
 | `scan.json` | Scanner output, rewritten every `--scan-refresh` s. |
 | `gridbot.log`, `scanner.log` | Rotating logs. Scanner runs unbuffered so its log is never stale. |
 | `gridbot.lock`, `scanner.pid`, `stop.request` | Instance lock, child pid, graceful-stop flag. |
@@ -232,3 +242,8 @@ change itself: its own branch, reviewed, never a flag default.
   no parent to close. The old shortcut is in `D:\_backups\`. Twin test
   passed: `schtasks /run /tn GridBot` while the bot is up leaves exactly
   one gridbot.py (the twin exits on the instance lock).
+  **Confirmed 2026-09-26 08:05:33:** a Start-menu power-off hard-killed the
+  bot (START with no STOP). Because the task had been Disabled, it stayed down
+  through three boots. It was recorded on 2026-09-27 as a reconstructed
+  `KILLED` row by `retire.py`. A STOP forged after the fact would have erased
+  the evidence this audit trail exists for.
