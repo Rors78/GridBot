@@ -320,3 +320,11 @@ Sum: **~25-60/min, about 1% of 6000.** With the one reading of other traffic (11
 - **P6, Kraken deletion:** only on order, after the Binance.US paper run is proven.
 
 The go-live gate is unchanged in content and **restarts on Binance.US**. `validate=False` stays refused in every broker.
+
+## 13. Addendum, 2026-09-27 (after operator and architect rulings)
+
+- **Ruling on section 11 item 1: don't port; replay first.** Two pre-registered replays. The trade-price replay is the SCREEN; the book-crossing replay on about 30 days of recorded book data is the DECIDER. Both pass rules are fixed in `audit/PREREG_BINANCEUS_REPLAY_2026-09-27.md` before either runs. Items 2-6 are ruled contingent on a pass: USDT; no keys; a new scanner module (oracle.py untouched); book-crossing fills; and the Kraken grids retired with a reconstructed KILLED row, not a STOP row.
+- **Fees are now a published fact, no longer [RE-VERIFY]:** 0% maker / 0.02% taker for every user on every pair since 2026-04-22 (Binance.US announcement, blog.binance.us/zero-fee-trading). This account's own rate is still unread (no key); that doesn't matter for paper.
+- **The 2026-09-23 replay cannot be re-run on Kraken.** Its input, `D:\GridPick\data\bars_15m`, no longer exists; a 6-level search of D:\ found no copy. Its recorded result (-1.25% of alloc per 10 days) stands as written.
+- **Book history** exists only in GoldenEye's recorder: 1m book candles for USDT pairs, from 2026-09-27 09:38 UTC. Ruling: read as static files offline; GridBot builds no recorder of its own.
+- **Still out of scope for the replay, noted here for a live port:** `TradeFeed` (Kraken WS v2) and `fetch_trades_since` (Kraken REST paging) are venue rewrites (section 2). The trade-id dedupe in `Grid.on_print` ports as it is, because Binance trade ids are sequential per symbol and shared by `@trade`, `/trades` and `/historicalTrades`.
