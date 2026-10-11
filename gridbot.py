@@ -109,16 +109,28 @@ class Grid:
         self.taker = float(taker_pct) / 100.0
         self.meta = dict(meta or {})
         # orders[j] is None (the one empty level, or everything once closed),
-        # {"side": BUY, "qty"} below the empty level, or
-        # {"side": SELL, "qty", "entry", "entry_fee"} above it.
+        # {"side": BUY, "qty", "source"} below the empty level, or
+        # {"side": SELL, "qty", "entry", "entry_fee", "source"} above it.
+        # source is "deploy" for a SELL resting the coins deploy() bought as
+        # a taker, else "ladder": selling the pre-buy is inventory, not a
+        # round trip (audit 2026-09-23 MED #4).
         self.orders: list[dict | None] = [None] * self.n
         self.empty: int | None = None
         self.cash = self.alloc
         self.base = 0.0
+        # realised = realised_ladder + realised_inventory, always. Ladder is
+        # completed buy-then-sell-one-level-up pairs; inventory is every other
+        # sale: deploy coins sold on the ladder, and everything close() sells.
         self.realised = 0.0
+        self.realised_ladder = 0.0
+        self.realised_inventory = 0.0
         self.fees = 0.0
         self.fills = 0
-        self.round_trips = 0
+        self.round_trips = 0        # ladder-source sells only
+        self.inventory_sells = 0    # deploy-source sells
+        # "source predates tagging" for a grid restored from a state.json
+        # saved before orders carried a source: its counts mix the two.
+        self.source_note: str | None = None
         # Exchange time of the SELL that completed the first round trip.
         # How long a fresh grid sits before it earns anything is the number
         # the scanner's fill count cannot give (audit 2026-09-23).
@@ -167,7 +179,7 @@ class Grid:
             raise ValueError(f"{self.symbol}: ladder needs ${need:.2f}, allocation is ${self.cash:.2f}")
         self.empty = e
         for j in range(e):
-            self.orders[j] = {"side": BUY, "qty": self.rung / self.levels[j]}
+            self.orders[j] = {"side": BUY, "qty": self.rung / self.levels[j], "source": "ladder"}
         cost = 0.0
         for j, q in pre:
             fee = q * price * self.taker
@@ -175,7 +187,8 @@ class Grid:
             self.base += q
             self.fees += fee
             cost += q * price + fee
-            self.orders[j] = {"side": SELL, "qty": q, "entry": price, "entry_fee": fee}
+            self.orders[j] = {"side": SELL, "qty": q, "entry": price, "entry_fee": fee,
+                              "source": "deploy"}
         self.status = "ACTIVE"
         self.deployed_at = ts
         self.deploy_px = price
@@ -231,7 +244,8 @@ class Grid:
         self.base += q
         self.fees += fee
         self.orders[j] = None
-        self.orders[self.empty] = {"side": SELL, "qty": q, "entry": L, "entry_fee": fee}
+        self.orders[self.empty] = {"side": SELL, "qty": q, "entry": L, "entry_fee": fee,
+                                   "source": "ladder"}
         self.empty = j
         self.fills += 1
         self.net_fills += 1
@@ -253,16 +267,23 @@ class Grid:
         self.fees += fee
         pnl = proceeds - fee - (q * o["entry"] + o["entry_fee"])
         self.realised += pnl
-        self.round_trips += 1
-        if self.round_trips == 1:
-            self.first_rt_at = ts
+        source = o.get("source", "ladder")
+        if source == "deploy":
+            self.realised_inventory += pnl
+            self.inventory_sells += 1
+        else:
+            self.realised_ladder += pnl
+            self.round_trips += 1
+            if self.round_trips == 1:
+                self.first_rt_at = ts
         self.orders[j] = None
-        self.orders[self.empty] = {"side": BUY, "qty": self.rung / self.levels[self.empty]}
+        self.orders[self.empty] = {"side": BUY, "qty": self.rung / self.levels[self.empty],
+                                   "source": "ladder"}
         self.empty = j
         self.fills += 1
         self.net_fills -= 1
         return {"side": SELL, "level": j, "price": L, "qty": q, "fee": fee,
-                "entry": o["entry"], "pnl": pnl, "print": printed, "ts": ts}
+                "entry": o["entry"], "pnl": pnl, "source": source, "print": printed, "ts": ts}
 
     def close(self, price: float, ts: float, reason: str) -> dict | None:
         """Sell every coin at `price` (taker) and stop. Everything is realised."""
@@ -275,6 +296,8 @@ class Grid:
             self.fees += fee
         self.base = 0.0
         self.realised = self.cash - self.alloc
+        # whatever the exit sale booked is inventory: no ladder pair completed
+        self.realised_inventory = self.realised - self.realised_ladder
         self.orders = [None] * self.n
         self.status = "CLOSED"
         self.closed_at = ts
@@ -333,12 +356,16 @@ class Grid:
                 "close_reason": self.close_reason, "days": days,
                 "realised": self.realised, "fees": self.fees, "fills": self.fills,
                 "round_trips": self.round_trips,
+                "realised_ladder": self.realised_ladder,
+                "realised_inventory": self.realised_inventory,
+                "inventory_sells": self.inventory_sells, "source_note": self.source_note,
                 "first_rt_at": self.first_rt_at, "time_to_first_rt_s": ttf,
                 "first_rt_note": ttf_note,
                 "predicted_yield_day": self.meta.get("yield_day")}
 
     _STATE = ("symbol", "key", "kind", "levels", "alloc", "meta", "orders", "empty",
-              "cash", "base", "realised", "fees", "fills", "round_trips", "first_rt_at", "net_fills",
+              "cash", "base", "realised", "realised_ladder", "realised_inventory", "fees",
+              "fills", "round_trips", "inventory_sells", "source_note", "first_rt_at", "net_fills",
               "status", "deployed_at", "deploy_px", "last_px", "last_ts",
               "last_trade_id", "outside_since", "exit_due", "gap_at", "gap_end", "closed_at", "close_px",
               "close_reason")
@@ -362,6 +389,20 @@ class Grid:
             if k in d:
                 setattr(g, k, d[k])
         g.orders = [dict(o) if o else None for o in d["orders"]]
+        # A state.json saved before orders carried a source: every order is
+        # taken as ladder and the whole of realised as ladder, which is what
+        # the counts already meant then. Tolerated and labelled, never refused.
+        untagged = False
+        for o in g.orders:
+            if isinstance(o, dict) and "source" not in o:
+                o["source"] = "ladder"
+                untagged = True
+        if "realised_ladder" not in d:
+            untagged = True
+            g.realised_ladder = g.realised if isinstance(g.realised, (int, float)) else 0.0
+            g.realised_inventory = 0.0
+        if untagged:
+            g.source_note = "source predates tagging"
         g.validate()
         return g
 
@@ -1991,7 +2032,10 @@ class Bot:
                     "holding": g.holding(), "empty_level": g.empty, "alloc": g.alloc,
                     "realised": g.realised, "unrealised": m["unrealised"], "total": m["total"],
                     "floor_pnl": g.floor_pnl(), "fees": g.fees, "fills": g.fills,
-                    "round_trips": g.round_trips, "deployed_at": iso(g.deployed_at),
+                    "round_trips": g.round_trips, "inventory_sells": g.inventory_sells,
+                    "realised_ladder": g.realised_ladder,
+                    "realised_inventory": g.realised_inventory, "source_note": g.source_note,
+                    "deployed_at": iso(g.deployed_at),
                     "age_s": now - g.deployed_at if g.deployed_at else None,
                     "last_print_age_s": (now - g.last_ts) if g.last_ts else None,
                     "outside_for_s": (now - g.outside_since) if g.outside_since else None,

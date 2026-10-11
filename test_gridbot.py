@@ -107,7 +107,8 @@ check("a print below it does, at the level price", len(f) == 1 and f[0]["side"] 
       and f[0]["price"] == 104.0, f)
 q = f[0]["qty"]
 check("the bought coins now rest as a SELL one level up (105)",
-      g.orders[5] == {"side": SELL, "qty": q, "entry": 104.0, "entry_fee": q * 104.0 * 0.0022})
+      g.orders[5] == {"side": SELL, "qty": q, "entry": 104.0, "entry_fee": q * 104.0 * 0.0022,
+                      "source": "ladder"})
 check("re-crossing the level it just filled at does nothing",
       g.on_print(104.2, 1003, 3) == [] and g.on_print(103.9, 1004, 4) == [])
 f = g.on_print(105.01, 1005, 5)
@@ -245,6 +246,94 @@ check("a pre-logging grid with round trips restores as 'predates logging', not p
       r_old.time_to_first_rt())
 check("the first-round-trip stamp survives save and restore",
       Grid.from_dict(old.to_dict()).first_rt_at == 1002)
+
+# -----------------------------------------------------------------------------
+print("\n8b. order source: selling the deploy pre-buy is inventory, not a round trip")
+g = new_grid()                               # empty 105; sells 106..110 rest deploy coins
+check("deploy tags its sells 'deploy' and every buy 'ladder'",
+      all(g.orders[j]["source"] == ("deploy" if j > 5 else "ladder") for j in range(11) if j != 5))
+f = g.on_print(106.01, 1001, 1)
+check("a print through the first deploy sell fills it", len(f) == 1 and f[0]["side"] == SELL
+      and f[0]["level"] == 6 and f[0]["source"] == "deploy", f)
+check("selling deploy coins does not count a round trip or stamp first_rt_at",
+      g.round_trips == 0 and g.first_rt_at is None and g.time_to_first_rt() == (None, "pending"),
+      (g.round_trips, g.first_rt_at))
+check("it counts as an inventory sell, its P/L as inventory",
+      g.inventory_sells == 1 and close(g.realised_inventory, f[0]["pnl"])
+      and g.realised_ladder == 0.0 and close(g.realised, f[0]["pnl"]))
+check("the buy it re-opens below is ladder", g.orders[5] == {"side": BUY, "qty": g.rung / 105.0,
+                                                           "source": "ladder"})
+g.on_print(104.99, 1002, 2)                  # ladder buy at 105, rests a ladder sell at 106
+f = g.on_print(106.01, 1003, 3)
+check("a ladder buy then sell one level up still completes a round trip",
+      len(f) == 1 and f[0]["source"] == "ladder" and g.round_trips == 1 and g.inventory_sells == 1)
+check("first_rt_at stamps on the first ladder sell, not the earlier deploy sell",
+      g.first_rt_at == 1003 and g.time_to_first_rt() == (3.0, None), g.first_rt_at)
+check("realised = ladder + inventory, ladder = that one pair's P/L",
+      close(g.realised, g.realised_ladder + g.realised_inventory)
+      and close(g.realised_ladder, f[0]["pnl"]) and ladder_ok(g) and conserved(g))
+s = g.close(103.0, 1004, "test")
+check("close() books the exit sale as inventory; realised unchanged by the split",
+      close(s["realised"], g.cash - g.alloc) and close(s["realised_ladder"], f[0]["pnl"])
+      and close(s["realised_inventory"], s["realised"] - s["realised_ladder"])
+      and s["round_trips"] == 1 and s["inventory_sells"] == 1 and s["source_note"] is None)
+
+# P/L, cash, fees, base and fills recorded from the engine BEFORE the source
+# split (b29f31d) on three seeded walks: the split must change no money, and
+# round_trips + inventory_sells must equal the old round_trips.
+GOLDEN = [
+    (("arith", 100.0, 110.0, 11, 104.6, 0.003, 11),
+     (173.79670467637078, 5.71798228861806, 0.0, 7.7967046763704175, 163, 84),
+     (173.79670467637078, 5.71798228861806, 7.79670467637078)),
+    (("geo", 0.9, 1.1, 30, 1.0137, 0.004, 7),
+     (101.95133874742328, 10.321116374155011, 68.66245130074346, 8.042925414089545, 825, 412),
+     (170.53686763025698, 10.582735536727554, 4.536867630256978)),
+    (("geo", 0.22399, 0.36957, 8, 0.28632, 0.006, 23),
+     (108.78171494385462, 1.618730104138918, 269.4241437513574, 25.96431494385457, 28, 14),
+     (185.24528482030183, 1.910400015331951, 19.245284820301833)),
+]
+for (kind, lo, hi, n, p0, vol, seed), mid, end in GOLDEN:
+    rng = random.Random(seed)
+    g = Grid("G/USD", "GUSD", oracle.make_levels(lo, hi, n, kind), kind, 166.0, 0.22, 0.38)
+    g.deploy(p0, 1000.0)
+    px = p0
+    for i in range(5000):
+        px = min(max(px * (1 + rng.gauss(0, vol)), lo * 0.9), hi * 1.1)
+        g.on_print(px, 1001.0 + i, i + 1)
+    got = (g.cash, g.fees, g.base, g.realised, g.fills)
+    check(f"{kind} {n} levels: cash, fees, base, realised, fills identical to the pre-split engine",
+          got == mid[:5], (got, mid[:5]))
+    check(f"{kind} {n} levels: round_trips + inventory_sells = the old round_trips ({mid[5]})",
+          g.round_trips + g.inventory_sells == mid[5] and g.inventory_sells > 0,
+          (g.round_trips, g.inventory_sells))
+    check(f"{kind} {n} levels: realised = ladder + inventory while open",
+          close(g.realised, g.realised_ladder + g.realised_inventory))
+    g.close(px, 9000.0, "golden")
+    check(f"{kind} {n} levels: close() cash, fees, realised identical to the pre-split engine",
+          (g.cash, g.fees, g.realised) == end, ((g.cash, g.fees, g.realised), end))
+
+old = new_grid()
+old.on_print(106.01, 1001, 1)                # a deploy sell
+old.on_print(104.99, 1002, 2)
+old.on_print(106.01, 1003, 3)                # a ladder round trip
+d_old = old.to_dict()
+for o in d_old["orders"]:
+    if o:
+        del o["source"]                      # a state.json saved before orders carried one
+for k in ("realised_ladder", "realised_inventory", "inventory_sells", "source_note"):
+    del d_old[k]
+d_old["round_trips"] = 2                     # what the old engine counted
+r_old = Grid.from_dict(json.loads(json.dumps(d_old)))
+check("a tagless restored grid loads, labelled 'source predates tagging'",
+      r_old.status == "ACTIVE" and r_old.source_note == "source predates tagging"
+      and r_old.summary()["source_note"] == "source predates tagging")
+check("its orders are taken as ladder, its realised as ladder, its counts as saved",
+      all(o["source"] == "ladder" for o in r_old.orders if o) and r_old.realised_ladder == old.realised
+      and r_old.realised_inventory == 0.0 and r_old.round_trips == 2 and r_old.inventory_sells == 0
+      and r_old.cash == old.cash and r_old.base == old.base)
+check("a tagged grid restores with no note and its split intact",
+      (lambda h: h.source_note is None and h.inventory_sells == 1 and h.round_trips == 1
+       and h.realised_inventory == old.realised_inventory)(Grid.from_dict(old.to_dict())))
 
 # -----------------------------------------------------------------------------
 print("\n9. feasibility follows Kraken's minimums")
