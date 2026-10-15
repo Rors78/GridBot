@@ -335,6 +335,26 @@ check("a tagged grid restores with no note and its split intact",
       (lambda h: h.source_note is None and h.inventory_sells == 1 and h.round_trips == 1
        and h.realised_inventory == old.realised_inventory)(Grid.from_dict(old.to_dict())))
 
+# book totals carry the split; realised_yield_day is ladder-only
+tt = gridbot.new_totals()
+a_s = new_grid()
+a_s.on_print(106.01, 1001, 1)                # deploy sell: inventory
+a_s.on_print(104.99, 1002, 2)
+f_l = a_s.on_print(106.01, 1003, 3)          # ladder round trip
+s_a = a_s.close(103.0, 1004, "test")
+gridbot.tally_closed(tt, s_a)
+check("closed totals: realised = ladder + inventory, counts split, no note",
+      close(tt["realised"], s_a["realised"]) and close(tt["realised_ladder"], f_l[0]["pnl"])
+      and close(tt["realised"], tt["realised_ladder"] + tt["realised_inventory"])
+      and tt["round_trips"] == 1 and tt["inventory_sells"] == 1 and tt["source_note"] is None, tt)
+legacy = {k: v for k, v in s_a.items()
+          if k not in ("realised_ladder", "realised_inventory", "inventory_sells", "source_note")}
+gridbot.tally_closed(tt, legacy)
+check("a summary saved before the split is summed as ladder and labels the totals",
+      tt["count"] == 2 and close(tt["realised_ladder"], f_l[0]["pnl"] + s_a["realised"])
+      and close(tt["realised"], tt["realised_ladder"] + tt["realised_inventory"])
+      and tt["source_note"] == "source predates tagging", tt)
+
 # -----------------------------------------------------------------------------
 print("\n9. feasibility follows Kraken's minimums")
 lv = oracle.make_levels(1.0, 2.0, 20, "arith")
@@ -710,6 +730,47 @@ b_rt.close_grid("AAA/USD", "test")
 exit_rt = [x for x in (json.loads(x) for x in (tmp_rt / "journal.jsonl").read_text().splitlines())
            if x["event"] == "EXIT"][-1]
 check("the EXIT row carries time_to_first_rt_s", close(exit_rt.get("time_to_first_rt_s", -1), 70.0), exit_rt)
+
+# MED #4 at the book: realised_yield_day is ladder-only, totals carry the split
+tmp_sp = Path(tempfile.mkdtemp(prefix="gridbot_test_"))
+b_sp = make_bot(tmp_sp, capital="165", max_grids="1")
+write_scan(tmp_sp, [scan_row("AAA/USD", 100, 110)])
+prices["AAAUSD"] = 104.6
+b_sp.skipped_gen = None
+b_sp.consider()
+g_sp = b_sp.grids["AAA/USD"]
+t_sp = g_sp.deployed_at
+up = next(j for j in range(g_sp.n) if g_sp.orders[j] and g_sp.orders[j]["source"] == "deploy")
+b_sp.on_trade("AAA/USD", g_sp.levels[up] + 0.01, t_sp + 10, 1)     # sells deploy coins
+b_sp.on_trade("AAA/USD", g_sp.levels[up - 1] - 0.01, t_sp + 20, 2)  # ladder buy
+b_sp.on_trade("AAA/USD", g_sp.levels[up] + 0.01, t_sp + 30, 3)      # ladder sell
+b_sp.clock = lambda: t_sp + 86400.0
+snap_sp = b_sp.snapshot()
+row_sp, open_sp = snap_sp["grids"][0], snap_sp["open"]
+check("realised_yield_day divides the ladder P/L only",
+      g_sp.inventory_sells == 1 and g_sp.round_trips == 1
+      and close(row_sp["realised_yield_day"], g_sp.realised_ladder / g_sp.alloc * 100.0)
+      and not close(row_sp["realised_yield_day"], g_sp.realised / g_sp.alloc * 100.0), row_sp)
+check("open book totals carry the ladder / inventory split",
+      close(open_sp["realised_ladder"], g_sp.realised_ladder)
+      and close(open_sp["realised_inventory"], g_sp.realised_inventory)
+      and open_sp["inventory_sells"] == 1 and open_sp["source_note"] is None, open_sp)
+b_sp.close_grid("AAA/USD", "test")
+st_sp = json.loads((tmp_sp / "state.json").read_text())["closed_totals"]
+check("closed_totals in state.json carry the split after an exit",
+      close(st_sp["realised"], st_sp["realised_ladder"] + st_sp["realised_inventory"])
+      and st_sp["inventory_sells"] == 1 and st_sp["round_trips"] == 1 and st_sp["source_note"] is None, st_sp)
+b_sp2 = make_bot(tmp_sp, capital="165", max_grids="1")
+b_sp2.load_state()
+check("the split survives a restart", b_sp2.totals == st_sp, (b_sp2.totals, st_sp))
+st_old = json.loads((tmp_sp / "state.json").read_text())
+st_old["closed_totals"] = {k: st_sp[k] for k in ("count", "realised", "fees", "round_trips", "fills")}
+(tmp_sp / "state.json").write_text(json.dumps(st_old))
+b_sp3 = make_bot(tmp_sp, capital="165", max_grids="1")
+b_sp3.load_state()
+check("closed_totals saved before the split restore as ladder, labelled, not refused",
+      close(b_sp3.totals["realised_ladder"], st_sp["realised"]) and b_sp3.totals["realised_inventory"] == 0.0
+      and b_sp3.totals["source_note"] == "source predates tagging" and b_sp3._state_loaded, b_sp3.totals)
 
 # -----------------------------------------------------------------------------
 print("\n13. records")

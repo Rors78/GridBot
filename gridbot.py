@@ -1027,6 +1027,36 @@ class Scanner:
             self._logf = None
 
 
+def new_totals() -> dict:
+    """Running totals over closed grids. realised = realised_ladder +
+    realised_inventory, as on each Grid (audit 2026-09-23 MED #4).
+    source_note is set once any grid summed in predates the split."""
+    return {"count": 0, "realised": 0.0, "fees": 0.0, "round_trips": 0, "fills": 0,
+            "realised_ladder": 0.0, "realised_inventory": 0.0, "inventory_sells": 0,
+            "source_note": None}
+
+
+def tally_closed(totals: dict, s: dict) -> None:
+    """Add one closed grid's summary to `totals`. A summary saved before the
+    split has no realised_ladder: its realised is taken as ladder, as
+    Grid.from_dict does, and the totals are labelled."""
+    realised = s.get("realised") or 0.0
+    totals["count"] += 1
+    totals["realised"] += realised
+    totals["fees"] += s.get("fees") or 0.0
+    totals["round_trips"] += s.get("round_trips") or 0
+    totals["fills"] += s.get("fills") or 0
+    totals["inventory_sells"] += s.get("inventory_sells") or 0
+    if s.get("realised_ladder") is None:
+        totals["realised_ladder"] += realised
+        totals["source_note"] = "source predates tagging"
+    else:
+        totals["realised_ladder"] += s["realised_ladder"]
+        totals["realised_inventory"] += s.get("realised_inventory") or 0.0
+    if s.get("source_note"):
+        totals["source_note"] = s["source_note"]
+
+
 # =============================================================================
 # THE BOT
 # =============================================================================
@@ -1052,7 +1082,7 @@ class Bot:
         self.closed: list[dict] = []           # recent summaries, display only
         # Running totals over EVERY closed grid. The list above is trimmed;
         # totals computed from it would forget old exits after a restart.
-        self.totals = {"count": 0, "realised": 0.0, "fees": 0.0, "round_trips": 0, "fills": 0}
+        self.totals = new_totals()
         self.cooldown: dict[str, float] = {}
         self.skipped: dict[str, str] = {}
         self.skipped_gen = None
@@ -1359,7 +1389,7 @@ class Bot:
     def _reset_restored(self) -> None:
         self.unrestored = {}
         self.grids, self.closed, self.cooldown = {}, [], {}
-        self.totals = {"count": 0, "realised": 0.0, "fees": 0.0, "round_trips": 0, "fills": 0}
+        self.totals = new_totals()
         self.syncing, self.pending = set(), {}
 
     def _restore(self, st: dict) -> None:
@@ -1387,19 +1417,22 @@ class Bot:
                 dropped.append(f"{g.symbol} (status {g.status!r})")
                 unrestored[key] = d
         closed = list(st.get("closed") or [])[-100:]
-        totals = {"count": 0, "realised": 0.0, "fees": 0.0, "round_trips": 0, "fills": 0}
+        totals = new_totals()
         saved_totals = st.get("closed_totals")
         if isinstance(saved_totals, dict):
             for k in totals:
-                if k in saved_totals:
+                if k == "source_note":
+                    totals[k] = str(saved_totals[k]) if saved_totals.get(k) else None
+                elif k in saved_totals:
                     totals[k] = type(totals[k])(saved_totals[k])
+            if "realised_ladder" not in saved_totals:
+                # saved before the split: all of it was counted as ladder then
+                totals["realised_ladder"] = totals["realised"]
+                totals["realised_inventory"] = 0.0
+                totals["source_note"] = "source predates tagging"
         else:                                   # older state: rebuild from the list
             for c in closed:
-                totals["count"] += 1
-                totals["realised"] += c.get("realised") or 0.0
-                totals["fees"] += c.get("fees") or 0.0
-                totals["round_trips"] += c.get("round_trips") or 0
-                totals["fills"] += c.get("fills") or 0
+                tally_closed(totals, c)
         cooldown = {k: float(v) for k, v in (st.get("cooldown") or {}).items()}
         saved_guard = st.get("guard")
         if isinstance(saved_guard, dict):
@@ -1413,11 +1446,7 @@ class Bot:
             s["recovered"] = True
             closed.append(s)
             closed = closed[-100:]
-            totals["count"] += 1
-            totals["realised"] += s["realised"] or 0.0
-            totals["fees"] += s["fees"] or 0.0
-            totals["round_trips"] += s["round_trips"] or 0
-            totals["fills"] += s["fills"] or 0
+            tally_closed(totals, s)
             when = g.closed_at or self.clock()
             cooldown[g.symbol] = max(cooldown.get(g.symbol, 0.0), when + self.args.cooldown * 60.0)
             rec_summaries.append(s)
@@ -1994,11 +2023,7 @@ class Bot:
             if s:
                 self.closed.append(s)
                 self.closed = self.closed[-100:]
-                self.totals["count"] += 1
-                self.totals["realised"] += s["realised"]
-                self.totals["fees"] += s["fees"]
-                self.totals["round_trips"] += s["round_trips"]
-                self.totals["fills"] += s["fills"]
+                tally_closed(self.totals, s)
             self.cooldown[symbol] = max(when, self.clock()) + self.args.cooldown * 60.0
             self.dirty = True
             syms = list(self.grids)
@@ -2016,11 +2041,14 @@ class Bot:
         with self.lock:
             rows = []
             tot = {"equity": 0.0, "realised": 0.0, "unrealised": 0.0, "fees": 0.0,
-                   "fills": 0, "round_trips": 0}
+                   "fills": 0, "round_trips": 0, "realised_ladder": 0.0,
+                   "realised_inventory": 0.0, "inventory_sells": 0, "source_note": None}
             for s, g in sorted(self.grids.items()):
                 m = g.mark()
                 days = (now - g.deployed_at) / 86400.0 if g.deployed_at else 0.0
-                real_yd = (g.realised / g.alloc * 100.0 / days) if days > 0.02 else None
+                # Ladder only: the scanner's yield_day counts ladder crossings,
+                # so selling the deploy pre-buy is not yield (MED #4).
+                real_yd = (g.realised_ladder / g.alloc * 100.0 / days) if days > 0.02 else None
                 scan_row = next((r for r in (self.scan or {}).get("results", [])
                                  if r.get("symbol") == s), None)
                 ttf, ttf_note = g.time_to_first_rt()
@@ -2059,6 +2087,11 @@ class Bot:
                 tot["fees"] += g.fees
                 tot["fills"] += g.fills
                 tot["round_trips"] += g.round_trips
+                tot["realised_ladder"] += g.realised_ladder
+                tot["realised_inventory"] += g.realised_inventory
+                tot["inventory_sells"] += g.inventory_sells
+                if g.source_note:
+                    tot["source_note"] = g.source_note
             closed_pnl = self.totals["realised"]
             committed = sum(g.alloc for g in self.grids.values())
             picks = []
