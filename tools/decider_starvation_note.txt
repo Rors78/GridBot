@@ -1,0 +1,7 @@
+NOT PASSED by starvation: no gap-free 240 h window existed on the recorder host.
+
+The registered deadline cut ({cut}) found {clean} clean grids against the floor of {floor}. {unclean} deployed grids were unclean: their 240 h windows contained unmeasured recorder minutes (recorder gaps, almost all of them host reboots), and the pre-registration never interpolates an unmeasured minute (prereg 2026-09-27, sections 3.13 and 5.7).
+
+This outcome measures the recorder host's uptime, not the grid. It is recorded as what the pre-registration says it is, NOT PASSED: the port does not proceed by default. Nothing in this note loosens the gap rule, reopens the sample floor, or reads the unclean grids. A verdict on the grid itself needs a recorder host that stays up for ten days.
+
+Wording fixed 2026-10-22 (operator ruling 2026-10-21, item 5), before any registered cut ran. Appended by audit/decider_daily.py when, and only when, the deadline verdict is underpowered and at least one deployed grid was unclean.
